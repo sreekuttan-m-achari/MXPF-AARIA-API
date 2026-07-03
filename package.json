@@ -3,12 +3,17 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
+  "bin": {
+    "aaria": "./bin/aaria"
+  },
   "engines": {
     "node": ">=22.13"
   },
   "scripts": {
     "start": "tsx src/main.ts",
-    "dev": "tsx watch src/main.ts"
+    "dev": "tsx watch src/main.ts",
+    "tui": "tsx src/tui/main.ts",
+    "install-cli": "bash deploy/install-cli.sh"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.13",
