@@ -24,10 +24,23 @@ export function brandLine(text: string): string {
   return `${c.brand}${c.bold}${text}${c.reset}`;
 }
 
-export function agentPrefix(): string {
-  return `${c.agent}${c.bold}aria${c.reset} ${c.dim}›${c.reset} `;
+/** Formal designation: AARIA (two A's) as A.A.R.I.A. */
+export const FORMAL_NAME = "A.A.R.I.A.";
+export const NAME_EXPANSION =
+  "Augmented Adaptive Reasoning Intelligence Assistant";
+
+export function formalTitleLine(): string {
+  return `${brandLine(FORMAL_NAME)} ${c.dim}— ${NAME_EXPANSION}${c.reset}`;
 }
 
-export function userPrefix(): string {
-  return `${c.brand}${c.bold}you${c.reset} ${c.dim}›${c.reset} `;
+/** Display name AARIA uses for herself in the chat (two A's, capitalised). */
+export const AGENT_LABEL = "Aaria";
+
+export function agentPrefix(): string {
+  return `${c.agent}${c.bold}${AGENT_LABEL}${c.reset} ${c.dim}›${c.reset} `;
+}
+
+export function userPrefix(name?: string): string {
+  const label = name?.trim() || "you";
+  return `${c.brand}${c.bold}${label}${c.reset} ${c.dim}›${c.reset} `;
 }

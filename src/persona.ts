@@ -106,6 +106,18 @@ export function agentCwd(): string {
   return process.env.AARIA_AGENT_CWD?.trim() || process.cwd();
 }
 
+/** Preferred name to address the user by, parsed from `**Call me:** X` in USER.md. */
+export function userCallName(cwd: string = agentCwd()): string | undefined {
+  const text = loadUserMarkdown(cwd);
+  if (!text) return undefined;
+  const match = text.match(
+    /^\s*\*{0,2}\s*(?:call me|name)\s*\*{0,2}\s*:\s*(.+)$/im,
+  );
+  if (!match) return undefined;
+  const name = match[1].replace(/\*/g, "").trim();
+  return name.length > 0 ? name : undefined;
+}
+
 /** Persona warm-up turn; returns the greeting text when successful. */
 export async function bootstrapPersonaIfPresent(
   agent: AriaAgent,

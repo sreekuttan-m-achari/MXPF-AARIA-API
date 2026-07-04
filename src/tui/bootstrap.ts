@@ -11,6 +11,7 @@ export type Health = {
   sessionId?: string;
   persona?: boolean;
   userProfile?: boolean;
+  user?: string;
   mcp?: { loaded: boolean; servers: string[] };
 };
 

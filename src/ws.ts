@@ -7,7 +7,7 @@ import type { AriaAgent } from "./agent.js";
 import { handleChatTurn } from "./chat.js";
 import { getMcpServerNames } from "./config/mcp.js";
 import { isChatCancelled } from "./errors.js";
-import { personaStatus } from "./persona.js";
+import { personaStatus, userCallName } from "./persona.js";
 import { cancelActiveRun } from "./runs.js";
 import { getGreeting, isWarm, onGreetingReady } from "./warmup.js";
 
@@ -17,7 +17,7 @@ type Inbound =
   | { type: "ping" };
 
 type Outbound =
-  | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string }
+  | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string; userName?: string }
   | { type: "greeting"; text: string }
   | { type: "pong" }
   | { type: "chunk"; id: string; text: string }
@@ -122,6 +122,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           greeting,
           persona: Boolean(persona.soulPath),
           userProfile: Boolean(persona.userPath),
+          user: userCallName(),
           mcp: {
             loaded: mcpServers.length > 0,
             servers: mcpServers,
@@ -245,6 +246,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
       warm: isWarm(),
       greeting: getGreeting(),
       sessionId: currentAgent().agentId,
+      userName: userCallName(),
     });
   }
 

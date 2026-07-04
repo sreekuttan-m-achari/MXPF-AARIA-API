@@ -3,7 +3,7 @@ import WebSocket from "ws";
 import { wsUrl } from "./config.js";
 
 type Outbound =
-  | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string }
+  | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string; userName?: string }
   | { type: "greeting"; text: string }
   | { type: "pong" }
   | { type: "chunk"; id: string; text: string }
@@ -23,7 +23,7 @@ export class AriaWsClient {
   private chatId = 0;
   private activeHandlers: ChatHandlers | undefined;
 
-  async connect(): Promise<{ greeting?: string; warm?: boolean }> {
+  async connect(): Promise<{ greeting?: string; warm?: boolean; userName?: string }> {
     const url = wsUrl();
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
@@ -48,7 +48,7 @@ export class AriaWsClient {
 
         if (msg.type === "ready") {
           clearTimeout(timeout);
-          resolve({ greeting: msg.greeting, warm: msg.warm });
+          resolve({ greeting: msg.greeting, warm: msg.warm, userName: msg.userName });
           return;
         }
 

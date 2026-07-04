@@ -1,0 +1,60 @@
+name: aaria
+
+services:
+  # ── A.A.R.I.A. API ──────────────────────────────────────────────────────────
+  # WebSocket + HTTP backend (health, chat, streaming). Warms the agent on boot.
+  aaria-api:
+    build: .
+    image: aaria-api:latest
+    container_name: aaria-api
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      AARIA_WS_HOST: "0.0.0.0"
+      AARIA_WS_PORT: "8788"
+      AARIA_API_URL: "http://127.0.0.1:8788"
+    ports:
+      # Bound to loopback only — this is a personal desk assistant, not a public API.
+      - "127.0.0.1:8788:8788"
+    volumes:
+      # Persist Cursor SDK agent state + resumable session id across restarts.
+      - aaria-state:/home/aria/.cursor
+      # Optional live persona / MCP overrides (create the files first, then uncomment):
+      # - ./SOUL.md:/app/SOUL.md:ro
+      # - ./USER.md:/app/USER.md:ro
+      # - ./.cursor/mcp.json:/app/.cursor/mcp.json:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8788/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # ── A.A.R.I.A. TUI ──────────────────────────────────────────────────────────
+  # Interactive terminal client. Enabled via the `tui` profile so it doesn't run
+  # by default. Talks to the API over the compose network.
+  #   docker compose run --rm tui
+  tui:
+    build: .
+    image: aaria-api:latest
+    profiles: ["tui"]
+    init: true
+    depends_on:
+      aaria-api:
+        condition: service_healthy
+    environment:
+      AARIA_API_URL: "http://aaria-api:8788"
+    stdin_open: true
+    tty: true
+    command: ["aaria"]
+
+volumes:
+  aaria-state:

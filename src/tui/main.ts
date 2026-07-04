@@ -4,20 +4,31 @@ import { stdin as input, stdout as output } from "node:process";
 
 import { ensureServerReady, fetchHealth, systemdServiceName, type Health } from "./bootstrap.js";
 import { AriaWsClient } from "./client.js";
+import {
+  completeLine,
+  looksLikeCommand,
+  matchCommands,
+  SLASH_COMMANDS,
+} from "./commands.js";
 import { apiBase } from "./config.js";
-import { agentPrefix, brandLine, c, userPrefix } from "./theme.js";
+import { Spinner } from "./spinner.js";
+import { agentPrefix, brandLine, c, formalTitleLine, userPrefix } from "./theme.js";
+
+function commandHelpLines(): string {
+  return SLASH_COMMANDS.map(
+    (cmd) => `  ${cmd.name.padEnd(10)}${cmd.summary}`,
+  ).join("\n");
+}
 
 function printHelp(): void {
   output.write(`
-${brandLine("ARIA")} ${c.dim}— Augmented Adaptive Reasoning Intelligence Assistant${c.reset}
+${formalTitleLine()}
 
 ${c.bold}Commands${c.reset}
-  /help     Show this help
-  /health   Backend status
-  /cancel   Cancel the current reply
-  /quit     Exit (${c.dim}also /exit, Ctrl+D${c.reset})
+${commandHelpLines()}
 
-${c.dim}Talk naturally for work tasks — code, DevOps, servers, planning.
+${c.dim}Type / for command suggestions · Tab to complete.
+Talk naturally for work tasks — code, DevOps, servers, planning.
 Home and Home Assistant → Amelia.${c.reset}
 
 `);
@@ -59,8 +70,10 @@ async function main(): Promise<void> {
   }
 
   const client = new AriaWsClient();
+  let userName: string | undefined;
   try {
     const ready = await client.connect();
+    userName = ready.userName || health.user;
     printBanner(health);
     if (startedService) {
       output.write(`${c.dim}started aria-api.service${c.reset}\n`);
@@ -77,10 +90,102 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const rl = readline.createInterface({ input, output, terminal: true });
+  const rl = readline.createInterface({
+    input,
+    output,
+    terminal: true,
+    completer: completeLine,
+  });
   let closed = false;
   let currentChatId: string | undefined;
   let streaming = false;
+  let activeSpinner: Spinner | undefined;
+
+  const interactive = Boolean(input.isTTY && output.isTTY);
+  let hintVisible = false;
+
+  // While the agent is working we detach readline's key handling so keystrokes
+  // are not echoed into the agent's output and stray Enters don't redraw the
+  // `you ›` prompt mid-reply. Only Ctrl+C is honoured (to cancel). Readline's
+  // own listeners are restored verbatim when the turn ends.
+  let inputSuspended = false;
+  let savedKeypressListeners: ((...args: unknown[]) => void)[] = [];
+
+  const streamKeypress = (_str: string | undefined, key: { name?: string; ctrl?: boolean } | undefined): void => {
+    if (key?.ctrl && key.name === "c") {
+      if (currentChatId) {
+        output.write(`\n${c.dim}cancelling…${c.reset}\n`);
+        client.cancel(currentChatId);
+      }
+    }
+    // Every other key is intentionally swallowed while the agent is working.
+  };
+
+  const suspendInput = (): void => {
+    if (!interactive || inputSuspended) {
+      return;
+    }
+    inputSuspended = true;
+    savedKeypressListeners = input.listeners("keypress") as typeof savedKeypressListeners;
+    input.removeAllListeners("keypress");
+    input.on("keypress", streamKeypress);
+  };
+
+  const resumeInput = (): void => {
+    if (!inputSuspended) {
+      return;
+    }
+    inputSuspended = false;
+    input.removeListener("keypress", streamKeypress);
+    for (const listener of savedKeypressListeners) {
+      input.on("keypress", listener);
+    }
+    savedKeypressListeners = [];
+  };
+
+  // Render a dim suggestion line just below the prompt while typing a command.
+  // Uses DEC save/restore cursor so the input line is never disturbed.
+  const clearHint = (): void => {
+    if (!hintVisible) {
+      return;
+    }
+    output.write("\x1b7\n\x1b[2K\x1b8");
+    hintVisible = false;
+  };
+
+  const renderHint = (): void => {
+    if (!interactive || streaming) {
+      return;
+    }
+    const line = rl.line ?? "";
+    if (!line.startsWith("/") || line.includes(" ")) {
+      clearHint();
+      return;
+    }
+    const matches = matchCommands(line);
+    if (matches.length === 0) {
+      clearHint();
+      return;
+    }
+    const text =
+      matches.length === 1
+        ? `${matches[0].name} — ${matches[0].summary}`
+        : matches.map((cmd) => cmd.name).join("  ");
+    output.write(`\x1b7\n\x1b[2K${c.dim}${text}${c.reset}\x1b8`);
+    hintVisible = true;
+  };
+
+  if (interactive) {
+    // Runs before readline's own handler: clear the hint on Enter so it does
+    // not linger on the submitted line; otherwise refresh after the keystroke.
+    input.prependListener("keypress", (_str, key) => {
+      if (key && (key.name === "return" || key.name === "enter")) {
+        clearHint();
+        return;
+      }
+      setImmediate(renderHint);
+    });
+  }
 
   const prompt = (): void => {
     if (!closed) {
@@ -89,15 +194,19 @@ async function main(): Promise<void> {
   };
 
   const finishTurn = (): void => {
+    activeSpinner?.stop();
+    activeSpinner = undefined;
     streaming = false;
     currentChatId = undefined;
+    resumeInput();
     output.write("\n\n");
     prompt();
   };
 
-  rl.setPrompt(userPrefix());
+  rl.setPrompt(userPrefix(userName));
 
   rl.on("SIGINT", () => {
+    clearHint();
     if (streaming && currentChatId) {
       output.write(`\n${c.dim}cancelling…${c.reset}\n`);
       client.cancel(currentChatId);
@@ -111,6 +220,7 @@ async function main(): Promise<void> {
 
   rl.on("line", (line) => {
     void (async () => {
+      clearHint();
       const text = line.trim();
       if (!text) {
         prompt();
@@ -157,6 +267,17 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (looksLikeCommand(text)) {
+        const matches = matchCommands(text.toLowerCase());
+        const suggestion =
+          matches.length > 0
+            ? ` Did you mean ${matches.map((cmd) => cmd.name).join(", ")}?`
+            : " Type /help for commands.";
+        output.write(`${c.warn}unknown command ${text}.${c.reset}${c.dim}${suggestion}${c.reset}\n\n`);
+        prompt();
+        return;
+      }
+
       if (streaming) {
         output.write(`${c.warn}wait for the current reply or /cancel${c.reset}\n`);
         prompt();
@@ -164,28 +285,57 @@ async function main(): Promise<void> {
       }
 
       streaming = true;
-      output.write(`\n${agentPrefix()}`);
+      suspendInput();
+
+      // Show a "working" indicator until the first token lands; then hand the
+      // line over to the streamed reply.
+      let firstChunk = true;
+      output.write("\n");
+      const spinner = new Spinner(
+        (frame) => `${agentPrefix()}${c.dim}${frame} working… ${c.reset}${c.dim}(Ctrl+C to cancel)${c.reset}`,
+      );
+      activeSpinner = spinner;
+      spinner.start();
+
+      const openAgentLine = (): void => {
+        if (firstChunk) {
+          firstChunk = false;
+          spinner.stop();
+          output.write(agentPrefix());
+        }
+      };
 
       try {
         currentChatId = client.sendChat(text, {
           onChunk: (chunk) => {
+            openAgentLine();
             output.write(chunk);
           },
           onDone: () => {
+            if (firstChunk) {
+              spinner.stop();
+              output.write(`${agentPrefix()}${c.dim}(no reply)${c.reset}`);
+              firstChunk = false;
+            }
             finishTurn();
           },
           onCancelled: (partial) => {
+            openAgentLine();
             output.write(`\n${c.dim}${partial ? "(cancelled)" : "cancelled"}${c.reset}`);
             finishTurn();
           },
           onError: (message) => {
+            openAgentLine();
             output.write(`\n${c.err}${message}${c.reset}`);
             finishTurn();
           },
         });
       } catch (err) {
+        spinner.stop();
+        activeSpinner = undefined;
         streaming = false;
         currentChatId = undefined;
+        resumeInput();
         const msg = err instanceof Error ? err.message : String(err);
         output.write(`${c.err}${msg}${c.reset}\n\n`);
         prompt();
@@ -196,6 +346,13 @@ async function main(): Promise<void> {
   rl.on("close", () => {
     client.close();
     process.exit(0);
+  });
+
+  // Never leave the terminal cursor hidden if we exit mid-spinner.
+  process.on("exit", () => {
+    if (output.isTTY) {
+      output.write("\x1b[?25h");
+    }
   });
 
   printHelp();

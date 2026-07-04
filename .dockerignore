@@ -1,0 +1,13 @@
+node_modules
+.git
+.gitignore
+.env
+*.ndjson
+.aria-conversations.ndjson
+dist
+Dockerfile
+docker-compose.yaml
+.dockerignore
+README.md
+npm-debug.log*
+*.log
