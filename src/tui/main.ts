@@ -11,6 +11,7 @@ import {
   SLASH_COMMANDS,
 } from "./commands.js";
 import { apiBase } from "./config.js";
+import { BootLoader } from "./loader.js";
 import { Spinner } from "./spinner.js";
 import { agentPrefix, brandLine, c, formalTitleLine, userPrefix } from "./theme.js";
 
@@ -44,20 +45,20 @@ function printBanner(health: Health): void {
 }
 
 async function main(): Promise<void> {
+  const loader = new BootLoader();
+  loader.start();
+
   let health: Health;
   let startedService = false;
   try {
     const ready = await ensureServerReady({
-      onStarting: () => {
-        output.write(`${c.dim}starting ${systemdServiceName()}…${c.reset}\n`);
-      },
-      onWaiting: () => {
-        output.write(`${c.dim}waiting for ARIA API…${c.reset}\n`);
-      },
+      onStarting: () => loader.setPhase(`booting ${systemdServiceName()}`),
+      onWaiting: () => loader.setPhase("warming systems"),
     });
     health = ready.health;
     startedService = ready.startedService;
   } catch (err) {
+    loader.stop();
     const msg = err instanceof Error ? err.message : String(err);
     output.write(`${c.err}ARIA API unreachable at ${apiBase()}${c.reset}\n`);
     output.write(`${c.dim}${msg}${c.reset}\n`);
@@ -65,6 +66,7 @@ async function main(): Promise<void> {
   }
 
   if (!health.ok) {
+    loader.stop();
     output.write(`${c.err}ARIA API reported not ok${c.reset}\n`);
     process.exit(1);
   }
@@ -72,8 +74,10 @@ async function main(): Promise<void> {
   const client = new AriaWsClient();
   let userName: string | undefined;
   try {
+    loader.setPhase("establishing uplink");
     const ready = await client.connect();
     userName = ready.userName || health.user;
+    loader.stop();
     printBanner(health);
     if (startedService) {
       output.write(`${c.dim}started aria-api.service${c.reset}\n`);
@@ -85,6 +89,7 @@ async function main(): Promise<void> {
       output.write(`${c.dim}Warming up…${c.reset}\n\n`);
     }
   } catch (err) {
+    loader.stop();
     const msg = err instanceof Error ? err.message : String(err);
     output.write(`${c.err}WebSocket connect failed: ${msg}${c.reset}\n`);
     process.exit(1);
