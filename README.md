@@ -58,7 +58,8 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 | **API server** | `src/main.ts`, `src/ws.ts` | HTTP + WebSocket endpoints, warmup, stale-run cleanup |
 | **Agent** | `src/agent-manager.ts`, `src/agent.ts` | Boots the Cursor SDK agent, local store, session resume |
 | **Chat** | `src/chat.ts`, `src/stream.ts`, `src/runs.ts` | Turn handling and token streaming |
-| **Persona** | `src/persona.ts` | Loads `SOUL.md` / `USER.md`, working dir |
+| **Persona** | `src/persona.ts` | Loads `SOUL.md` / `USER.md` / `MEMORY.md`, working dir |
+| **Learn loop** | `src/learn/*.ts` | Post-turn review → `MEMORY.md` / `USER.md` (Hermes-style) |
 | **MCP** | `src/config/mcp.ts` | Loads `.cursor/mcp.json` tool servers |
 | **TUI** | `src/tui/*.ts` | `aaria` terminal client (REPL, completion, auto-start) |
 | **Deploy** | `deploy/*`, `bin/aaria` | systemd unit + CLI installer |
@@ -67,7 +68,10 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET`  | `/health` | Status: name, version, session id, warm flag, greeting, persona/MCP presence |
+| `GET`  | `/health` | Status: name, version, session id, warm flag, greeting, persona/MCP/memory stats |
+| `GET`  | `/memory/pending` | Staged learn entries (when `AARIA_LEARN_APPROVAL=1`) |
+| `POST` | `/memory/approve` | `{ "id": "abc" \| "all" }` — apply staged entries |
+| `POST` | `/memory/reject` | `{ "id": "abc" \| "all" }` — discard staged entries |
 | `POST` | `/chat` | `{ "message": "...", "id": "..." }` → `{ "reply": "..." }` |
 | `POST` | `/chat/stream` | Same body → `text/event-stream` of `chunk` events, then `done` |
 | `POST` | `/chat/cancel` | `{ "id": "..." }` → cancels an in-flight reply |
@@ -112,7 +116,8 @@ cp .env-sample .env
 
 cp SOUL.sample.md SOUL.md      # optional: customise the persona
 cp USER.sample.md USER.md      # optional: tell her about you
-cp .cursor/mcp.json.sample .cursor/mcp.json   # optional: enable MCP tools
+cp MEMORY.sample.md MEMORY.md  # optional: seed agent memory (learn loop appends here)
+cp .cursor/mcp.json.sample .cursor/mcp.json   # optional: enable MCP tools (incl. memory)
 ```
 
 ### 2a. Run on the host (systemd user service)
@@ -191,6 +196,23 @@ All settings are environment variables (see `.env-sample`). Common ones:
 | `MCP_CONFIG_PATH` | `.cursor/mcp.json` | MCP config location |
 | `HA_BASE_URL` / `HA_MCP_HTTP_URL` / `HA_API_ACCESS_TOKEN` | — | Home Assistant MCP |
 | `AARIA_DEBUG` / `AARIA_DEBUG_STREAM` / `AARIA_DEBUG_LOG` | off | Verbose conversation logging |
+| `AARIA_LEARN_REVIEW` | on | Post-turn background review (set `0` to disable) |
+| `AARIA_LEARN_APPROVAL` | off | Stage learn writes; approve in TUI with `/memory approve` |
+| `AARIA_MEMORY_CHAR_LIMIT` | `2200` | Max chars in `MEMORY.md` |
+| `AGENT_MEMORY_PATH` | `./MEMORY.md` | Agent memory file |
+
+### Learn loop (Phase 1–2)
+
+Inspired by [Hermes Agent](https://github.com/nousresearch/hermes-agent) memory curation:
+
+1. **After each chat turn**, a background LLM review decides if anything durable should be saved.
+2. **Work facts** go to `MEMORY.md` (§-prefixed lines, injected at session bootstrap).
+3. **User preferences** append to `USER.md` under `## Learned (auto)`.
+4. The TUI shows `💾 learned` (or `💾 staged` when approval mode is on).
+
+TUI commands: `/memory pending`, `/memory approve [id|all]`, `/memory reject [id|all]`.
+
+Enable MCP **memory** (`cp .cursor/mcp.json.sample .cursor/mcp.json`) for in-session knowledge-graph recall alongside file memory.
 
 ### MCP tools
 

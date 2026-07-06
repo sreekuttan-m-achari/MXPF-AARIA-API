@@ -2,11 +2,23 @@ import http, { type IncomingMessage } from "node:http";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
+import { enqueueAgentWork } from "./agent-queue.js";
 import { getAgent } from "./agent-manager.js";
 import type { AriaAgent } from "./agent.js";
 import { handleChatTurn } from "./chat.js";
 import { getMcpServerNames } from "./config/mcp.js";
 import { isChatCancelled } from "./errors.js";
+import {
+  approveAllPending,
+  approvePending,
+  isLearnApprovalRequired,
+  loadPending,
+  rejectAllPending,
+  rejectPending,
+} from "./learn/pending.js";
+import { memoryUsage } from "./learn/memory-store.js";
+import { onLearnNotification } from "./learn/notify.js";
+import { learnReviewEnabled } from "./learn/review.js";
 import { personaStatus, userCallName } from "./persona.js";
 import { cancelActiveRun } from "./runs.js";
 import { getGreeting, isWarm, onGreetingReady } from "./warmup.js";
@@ -23,7 +35,14 @@ type Outbound =
   | { type: "chunk"; id: string; text: string }
   | { type: "done"; id: string; reply: string }
   | { type: "cancelled"; id: string; reply?: string }
-  | { type: "error"; id?: string; error: string };
+  | { type: "error"; id?: string; error: string }
+  | {
+      type: "learned";
+      target: "memory" | "user";
+      preview: string;
+      staged?: boolean;
+      pendingId?: string;
+    };
 
 function wsHost(): string {
   return process.env.AARIA_WS_HOST?.trim() || "127.0.0.1";
@@ -39,18 +58,6 @@ function send(ws: WebSocket, msg: Outbound): void {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(msg));
   }
-}
-
-function createSerialQueue() {
-  let chain: Promise<void> = Promise.resolve();
-  return <T>(fn: () => Promise<T>): Promise<T> => {
-    const run = chain.then(fn, fn);
-    chain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  };
 }
 
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -94,7 +101,6 @@ function sseWrite(res: import("node:http").ServerResponse, data: unknown): void 
 export async function startServer(agent: AriaAgent): Promise<void> {
   const host = wsHost();
   const port = wsPort();
-  const enqueue = createSerialQueue();
   const currentAgent = () => getAgent();
 
   const httpServer = http.createServer((req, res) => {
@@ -113,6 +119,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         const persona = personaStatus();
         const greeting = getGreeting();
         const mcpServers = getMcpServerNames();
+        const mem = memoryUsage();
         jsonResponse(res, 200, {
           ok: true,
           name: "ARIA",
@@ -122,12 +129,73 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           greeting,
           persona: Boolean(persona.soulPath),
           userProfile: Boolean(persona.userPath),
+          memory: Boolean(persona.memoryPath),
           user: userCallName(),
+          learn: { review: learnReviewEnabled() },
+          memoryStats: persona.memoryPath
+            ? { entries: mem.entries, chars: mem.chars, limit: mem.limit }
+            : undefined,
           mcp: {
             loaded: mcpServers.length > 0,
             servers: mcpServers,
           },
         });
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/memory/pending") {
+        const pending = loadPending();
+        jsonResponse(res, 200, {
+          ok: true,
+          approvalRequired: isLearnApprovalRequired(),
+          pending,
+        });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/memory/approve") {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const id = (body as { id?: string }).id?.trim() ?? "";
+        if (!id || id === "all") {
+          const result = approveAllPending();
+          jsonResponse(res, 200, { ok: true, ...result });
+          return;
+        }
+        const result = approvePending(id);
+        if (!result.ok) {
+          jsonResponse(res, 404, { ok: false, error: result.error });
+          return;
+        }
+        jsonResponse(res, 200, { ok: true, target: result.target, preview: result.preview, id });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/memory/reject") {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const id = (body as { id?: string }).id?.trim() ?? "";
+        if (!id || id === "all") {
+          const count = rejectAllPending();
+          jsonResponse(res, 200, { ok: true, rejected: count });
+          return;
+        }
+        const rejected = rejectPending(id);
+        if (!rejected) {
+          jsonResponse(res, 404, { ok: false, error: `no pending entry ${id}` });
+          return;
+        }
+        jsonResponse(res, 200, { ok: true, id });
         return;
       }
 
@@ -172,7 +240,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         });
 
         try {
-          const reply = await enqueue(() =>
+          const reply = await enqueueAgentWork(() =>
             handleChatTurn(currentAgent(), "http-stream", id, message, (text) => {
               sseWrite(res, { type: "chunk", id, text });
             }),
@@ -209,7 +277,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           return;
         }
         try {
-          const reply = await enqueue(() =>
+          const reply = await enqueueAgentWork(() =>
             handleChatTurn(currentAgent(), "http", id, message),
           );
           jsonResponse(res, 200, { reply, id });
@@ -253,6 +321,13 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   onGreetingReady((greeting) => {
     for (const client of wss.clients) {
       send(client, { type: "greeting", text: greeting });
+    }
+  });
+
+  onLearnNotification((event) => {
+    const msg: Outbound = { type: "learned", ...event };
+    for (const client of wss.clients) {
+      send(client, msg);
     }
   });
 
@@ -300,7 +375,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         }
 
         try {
-          const reply = await enqueue(() =>
+          const reply = await enqueueAgentWork(() =>
             handleChatTurn(currentAgent(), "ws", id, message, (text) => {
               send(ws, { type: "chunk", id, text });
             }),
@@ -328,7 +403,8 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   });
 
   console.error(`[aria-server] ws://${host}:${port}`);
-  console.error(`[aria-server] GET /health  POST /chat  POST /chat/cancel  POST /chat/stream`);
+  console.error(`[aria-server] GET /health  GET /memory/pending  POST /memory/approve  POST /memory/reject`);
+  console.error(`[aria-server] POST /chat  POST /chat/cancel  POST /chat/stream`);
 
   await new Promise<void>((resolve) => {
     const shutdown = (): void => {

@@ -4,4 +4,6 @@ dist/
 .aria-conversations.ndjson
 SOUL.md
 USER.md
+MEMORY.md
+.aria-learn-pending.json
 .cursor/mcp.json

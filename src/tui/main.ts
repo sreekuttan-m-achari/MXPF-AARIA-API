@@ -6,6 +6,7 @@ import { ensureServerReady, fetchHealth, systemdServiceName, type Health } from 
 import { AriaWsClient } from "./client.js";
 import {
   completeLine,
+  isMemoryCommand,
   looksLikeCommand,
   matchCommands,
   SLASH_COMMANDS,
@@ -75,6 +76,20 @@ async function main(): Promise<void> {
 
   const client = new AriaWsClient();
   let userName: string | undefined;
+  client.onLearned((event) => {
+    if (closed) {
+      return;
+    }
+    const where = event.target === "memory" ? "MEMORY.md" : "USER.md";
+    const label = event.staged ? "staged" : "learned";
+    const id = event.pendingId ? ` · ${event.pendingId}` : "";
+    output.write(
+      `\n${c.dim}💾 ${label} → ${where}${id}: ${event.preview}${c.reset}\n`,
+    );
+    if (!streaming) {
+      prompt();
+    }
+  });
   try {
     loader.setPhase("establishing uplink");
     const ready = await client.connect();
@@ -310,14 +325,26 @@ async function main(): Promise<void> {
       if (lower === "/health") {
         try {
           const h = await fetchHealth();
+          const mem =
+            h.memoryStats != null
+              ? ` memory=${h.memoryStats.entries}/${h.memoryStats.limit}ch`
+              : h.memory
+                ? " memory=yes"
+                : "";
+          const learn = h.learn?.review ? " learn=on" : " learn=off";
           output.write(
-            `${c.ok}ok${c.reset} warm=${h.warm ? "yes" : "no"} persona=${h.persona ? "yes" : "no"} mcp=${h.mcp?.loaded ? h.mcp.servers.join(", ") : "off"}\n\n`,
+            `${c.ok}ok${c.reset} warm=${h.warm ? "yes" : "no"} persona=${h.persona ? "yes" : "no"}${mem}${learn} mcp=${h.mcp?.loaded ? h.mcp.servers.join(", ") : "off"}\n\n`,
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           output.write(`${c.err}${msg}${c.reset}\n\n`);
         }
         prompt();
+        return;
+      }
+
+      if (isMemoryCommand(text)) {
+        await handleMemoryCommand(text);
         return;
       }
 
@@ -390,6 +417,95 @@ async function main(): Promise<void> {
         output.write(`${c.err}${msg}${c.reset}\n\n`);
         prompt();
       }
+  }
+
+  async function handleMemoryCommand(text: string): Promise<void> {
+    const parts = text.trim().split(/\s+/);
+    const sub = (parts[1] ?? "pending").toLowerCase();
+    const arg = parts[2]?.toLowerCase();
+
+    try {
+      if (sub === "pending" || sub === "list") {
+        const res = await fetch(`${apiBase()}/memory/pending`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!res.ok) {
+          throw new Error(`/memory/pending returned ${res.status}`);
+        }
+        const body = (await res.json()) as {
+          pending: Array<{ id: string; target: string; content: string }>;
+          approvalRequired?: boolean;
+        };
+        if (body.pending.length === 0) {
+          output.write(`${c.dim}no pending learn entries${c.reset}\n\n`);
+        } else {
+          for (const entry of body.pending) {
+            output.write(
+              `${c.dim}${entry.id}${c.reset} [${entry.target}] ${entry.content}\n`,
+            );
+          }
+          output.write("\n");
+        }
+        prompt();
+        return;
+      }
+
+      if (sub === "approve") {
+        const id = arg && arg !== "all" ? arg : "all";
+        const res = await fetch(`${apiBase()}/memory/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id }),
+          signal: AbortSignal.timeout(5_000),
+        });
+        const body = (await res.json()) as {
+          ok?: boolean;
+          applied?: number;
+          preview?: string;
+          error?: string;
+        };
+        if (!res.ok || body.error) {
+          throw new Error(body.error ?? `approve failed (${res.status})`);
+        }
+        if (id === "all") {
+          output.write(`${c.ok}approved ${body.applied ?? 0} entries${c.reset}\n\n`);
+        } else {
+          output.write(`${c.ok}approved${c.reset} ${body.preview ?? id}\n\n`);
+        }
+        prompt();
+        return;
+      }
+
+      if (sub === "reject") {
+        const id = arg && arg !== "all" ? arg : "all";
+        const res = await fetch(`${apiBase()}/memory/reject`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id }),
+          signal: AbortSignal.timeout(5_000),
+        });
+        const body = (await res.json()) as { ok?: boolean; rejected?: number; error?: string };
+        if (!res.ok || body.error) {
+          throw new Error(body.error ?? `reject failed (${res.status})`);
+        }
+        if (id === "all") {
+          output.write(`${c.dim}rejected ${body.rejected ?? 0} entries${c.reset}\n\n`);
+        } else {
+          output.write(`${c.dim}rejected ${id}${c.reset}\n\n`);
+        }
+        prompt();
+        return;
+      }
+
+      output.write(
+        `${c.dim}usage: /memory pending · /memory approve [id|all] · /memory reject [id|all]${c.reset}\n\n`,
+      );
+      prompt();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(`${c.err}${msg}${c.reset}\n\n`);
+      prompt();
+    }
   }
 
   rl.on("close", () => {

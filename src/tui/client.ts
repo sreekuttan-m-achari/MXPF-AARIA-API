@@ -9,7 +9,16 @@ type Outbound =
   | { type: "chunk"; id: string; text: string }
   | { type: "done"; id: string; reply: string }
   | { type: "cancelled"; id: string; reply?: string }
-  | { type: "error"; id?: string; error: string };
+  | { type: "error"; id?: string; error: string }
+  | {
+      type: "learned";
+      target: "memory" | "user";
+      preview: string;
+      staged?: boolean;
+      pendingId?: string;
+    };
+
+export type LearnedEvent = Extract<Outbound, { type: "learned" }>;
 
 export type ChatHandlers = {
   onChunk: (text: string) => void;
@@ -18,10 +27,13 @@ export type ChatHandlers = {
   onError: (message: string) => void;
 };
 
+export type LearnHandler = (event: LearnedEvent) => void;
+
 export class AriaWsClient {
   private ws: WebSocket | undefined;
   private chatId = 0;
   private activeHandlers: ChatHandlers | undefined;
+  private learnHandler: LearnHandler | undefined;
 
   async connect(): Promise<{ greeting?: string; warm?: boolean; userName?: string }> {
     const url = wsUrl();
@@ -81,6 +93,11 @@ export class AriaWsClient {
             clearTimeout(timeout);
             reject(new Error(msg.error));
           }
+          return;
+        }
+
+        if (msg.type === "learned" && this.learnHandler) {
+          this.learnHandler(msg);
         }
       });
 
@@ -96,6 +113,10 @@ export class AriaWsClient {
         }
       });
     });
+  }
+
+  onLearned(handler: LearnHandler): void {
+    this.learnHandler = handler;
   }
 
   sendChat(message: string, handlers: ChatHandlers): string {

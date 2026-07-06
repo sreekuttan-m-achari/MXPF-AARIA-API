@@ -7,6 +7,7 @@ export type SlashCommand = {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/help", summary: "Show this help" },
   { name: "/health", summary: "Backend status" },
+  { name: "/memory", summary: "Memory learn loop (pending · approve · reject)" },
   { name: "/cancel", summary: "Cancel the current reply" },
   { name: "/quit", aliases: ["/exit"], summary: "Exit (also /exit, Ctrl+D)" },
 ];
@@ -42,4 +43,9 @@ export function completeLine(line: string): [string[], string] {
 /** True when the text looks like a bare slash-command token (no path, no spaces). */
 export function looksLikeCommand(text: string): boolean {
   return /^\/[a-zA-Z]+$/.test(text);
+}
+
+/** Prefix commands with sub-arguments (e.g. /memory pending). */
+export function isMemoryCommand(text: string): boolean {
+  return text.toLowerCase().startsWith("/memory");
 }

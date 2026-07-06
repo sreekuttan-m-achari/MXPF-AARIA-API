@@ -11,7 +11,10 @@ export type Health = {
   sessionId?: string;
   persona?: boolean;
   userProfile?: boolean;
+  memory?: boolean;
   user?: string;
+  learn?: { review: boolean };
+  memoryStats?: { entries: number; chars: number; limit: number };
   mcp?: { loaded: boolean; servers: string[] };
 };
 

@@ -5,6 +5,12 @@ import { CursorAgentError } from "@cursor/sdk";
 
 import type { AriaAgent } from "./agent.js";
 import { createStreamingCollector } from "./stream.js";
+import {
+  formatMemoryForPrompt,
+  loadMemoryEntries,
+  memoryFileExists,
+  resolveMemoryFilePath,
+} from "./learn/memory-store.js";
 
 const DEFAULT_CANDIDATES = ["SOUL.md", "PROFILE.md"] as const;
 
@@ -60,6 +66,7 @@ export function loadUserMarkdown(cwd: string): string | undefined {
 function buildBootstrapUserMessage(
   persona: string,
   userContext?: string,
+  memoryContext?: string,
 ): string {
   const parts = [
     "The following block is your standing persona and operating instructions for this entire session.",
@@ -70,6 +77,16 @@ function buildBootstrapUserMessage(
     "",
     persona,
   ];
+  if (memoryContext?.trim()) {
+    parts.push(
+      "",
+      "---",
+      "",
+      "## Memory (from MEMORY.md)",
+      "",
+      memoryContext.trim(),
+    );
+  }
   if (userContext?.trim()) {
     parts.push(
       "",
@@ -129,6 +146,9 @@ export async function bootstrapPersonaIfPresent(
   const persona = loadPersonaMarkdown(cwd);
   const userPath = resolveUserFilePath(cwd);
   const userContext = loadUserMarkdown(cwd);
+  const memoryPath = resolveMemoryFilePath(cwd);
+  const memoryEntries = loadMemoryEntries(cwd);
+  const memoryContext = formatMemoryForPrompt(memoryEntries, cwd);
 
   if (soulOverride && !path) {
     console.error(
@@ -147,12 +167,15 @@ export async function bootstrapPersonaIfPresent(
   if (userPath && userContext) {
     console.error(`[persona] Loading ${userPath}…`);
   }
+  if (memoryFileExists(cwd)) {
+    console.error(`[persona] Loading ${memoryPath}…`);
+  }
 
   const collector = createStreamingCollector();
 
   try {
     const run = await agent.send(
-      buildBootstrapUserMessage(persona, userContext),
+      buildBootstrapUserMessage(persona, userContext, memoryContext),
     );
     for await (const event of run.stream()) {
       collector.handleEvent(event);
@@ -177,9 +200,11 @@ export async function bootstrapPersonaIfPresent(
 export function personaStatus(cwd: string = agentCwd()): {
   soulPath?: string;
   userPath?: string;
+  memoryPath?: string;
 } {
   return {
     soulPath: resolvePersonaFilePath(cwd),
     userPath: resolveUserFilePath(cwd),
+    memoryPath: memoryFileExists(cwd) ? resolveMemoryFilePath(cwd) : undefined,
   };
 }

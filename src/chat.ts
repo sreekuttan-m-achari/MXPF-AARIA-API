@@ -6,6 +6,7 @@ import {
   type ConversationTransport,
 } from "./debug.js";
 import { isChatCancelled } from "./errors.js";
+import { scheduleLearnReview } from "./learn/review.js";
 import { waitForWarmup } from "./warmup.js";
 import { isRecoverableRunError, runChatTurn } from "./stream.js";
 
@@ -36,6 +37,7 @@ export async function handleChatTurn(
       reply,
       durationMs: Date.now() - started,
     });
+    scheduleLearnReview(agent, message, reply);
     return reply;
   } catch (err) {
     if (isChatCancelled(err)) {
