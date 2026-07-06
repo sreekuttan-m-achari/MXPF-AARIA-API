@@ -10,9 +10,10 @@ import {
   matchCommands,
   SLASH_COMMANDS,
 } from "./commands.js";
+import { TurnActivity } from "./activity.js";
 import { apiBase } from "./config.js";
 import { BootLoader } from "./loader.js";
-import { Spinner } from "./spinner.js";
+import { createPasteAwareInput } from "./paste-input.js";
 import { agentPrefix, brandLine, c, formalTitleLine, userPrefix } from "./theme.js";
 
 function commandHelpLines(): string {
@@ -29,6 +30,7 @@ ${c.bold}Commands${c.reset}
 ${commandHelpLines()}
 
 ${c.dim}Type / for command suggestions · Tab to complete.
+Paste multiple lines as one message · end a line with \\ to continue on the next.
 Talk naturally for work tasks — code, DevOps, servers, planning.
 Home and Home Assistant → Amelia.${c.reset}
 
@@ -95,8 +97,28 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const interactive = Boolean(input.isTTY && output.isTTY);
+
+  const ttyInput = interactive
+    ? createPasteAwareInput(input, output, {
+        onPaste: (text) => {
+          const trimmed = text.trim();
+          if (!trimmed) {
+            return;
+          }
+          const lines = trimmed.split("\n").length;
+          draftMessage = trimmed;
+          output.write(
+            `\n${c.dim}(pasted ${lines} line${lines === 1 ? "" : "s"} — Enter to send · Esc to clear)${c.reset}\n`,
+          );
+          rl.write("");
+          prompt();
+        },
+      })
+    : input;
+
   const rl = readline.createInterface({
-    input,
+    input: ttyInput,
     output,
     terminal: true,
     completer: completeLine,
@@ -104,9 +126,10 @@ async function main(): Promise<void> {
   let closed = false;
   let currentChatId: string | undefined;
   let streaming = false;
-  let activeSpinner: Spinner | undefined;
+  let activeTurn: TurnActivity | undefined;
+  let draftMessage: string | null = null;
+  let continuation = "";
 
-  const interactive = Boolean(input.isTTY && output.isTTY);
   let hintVisible = false;
 
   // While the agent is working we detach readline's key handling so keystrokes
@@ -184,6 +207,14 @@ async function main(): Promise<void> {
     // Runs before readline's own handler: clear the hint on Enter so it does
     // not linger on the submitted line; otherwise refresh after the keystroke.
     input.prependListener("keypress", (_str, key) => {
+      if (draftMessage && key?.name === "escape") {
+        draftMessage = null;
+        continuation = "";
+        rl.setPrompt(userPrefix(userName));
+        output.write(`\r\x1b[2K${c.dim}(paste cleared)${c.reset}\n`);
+        prompt();
+        return;
+      }
       if (key && (key.name === "return" || key.name === "enter")) {
         clearHint();
         return;
@@ -199,8 +230,8 @@ async function main(): Promise<void> {
   };
 
   const finishTurn = (): void => {
-    activeSpinner?.stop();
-    activeSpinner = undefined;
+    activeTurn?.end();
+    activeTurn = undefined;
     streaming = false;
     currentChatId = undefined;
     resumeInput();
@@ -226,13 +257,42 @@ async function main(): Promise<void> {
   rl.on("line", (line) => {
     void (async () => {
       clearHint();
-      const text = line.trim();
+
+      if (draftMessage !== null) {
+        const text = draftMessage.trim();
+        draftMessage = null;
+        continuation = "";
+        rl.setPrompt(userPrefix(userName));
+        if (!text) {
+          prompt();
+          return;
+        }
+        await processUserInput(text);
+        return;
+      }
+
+      if (line.endsWith("\\") && !looksLikeCommand(line.trim())) {
+        continuation += `${line.slice(0, -1)}\n`;
+        rl.setPrompt(`${c.dim}  … › ${c.reset}`);
+        prompt();
+        return;
+      }
+
+      const text = `${continuation}${line}`.trim();
+      continuation = "";
+      rl.setPrompt(userPrefix(userName));
+
       if (!text) {
         prompt();
         return;
       }
 
-      const lower = text.toLowerCase();
+      await processUserInput(text);
+    })();
+  });
+
+  async function processUserInput(text: string): Promise<void> {
+    const lower = text.toLowerCase();
       if (lower === "/quit" || lower === "/exit") {
         output.write(`${c.dim}bye${c.reset}\n`);
         closed = true;
@@ -292,52 +352,37 @@ async function main(): Promise<void> {
       streaming = true;
       suspendInput();
 
-      // Show a "working" indicator until the first token lands; then hand the
-      // line over to the streamed reply.
-      let firstChunk = true;
-      output.write("\n");
-      const spinner = new Spinner(
-        (frame) => `${agentPrefix()}${c.dim}${frame} working… ${c.reset}${c.dim}(Ctrl+C to cancel)${c.reset}`,
-      );
-      activeSpinner = spinner;
-      spinner.start();
-
-      const openAgentLine = (): void => {
-        if (firstChunk) {
-          firstChunk = false;
-          spinner.stop();
-          output.write(agentPrefix());
-        }
-      };
+      const turn = new TurnActivity();
+      activeTurn = turn;
+      turn.begin();
 
       try {
         currentChatId = client.sendChat(text, {
           onChunk: (chunk) => {
-            openAgentLine();
-            output.write(chunk);
+            turn.onChunk(chunk);
           },
           onDone: () => {
-            if (firstChunk) {
-              spinner.stop();
+            if (!turn.hasContent) {
               output.write(`${agentPrefix()}${c.dim}(no reply)${c.reset}`);
-              firstChunk = false;
             }
             finishTurn();
           },
           onCancelled: (partial) => {
-            openAgentLine();
-            output.write(`\n${c.dim}${partial ? "(cancelled)" : "cancelled"}${c.reset}`);
+            if (partial) {
+              output.write(`\n${c.dim}(cancelled)${c.reset}`);
+            } else {
+              output.write(`\n${c.dim}cancelled${c.reset}`);
+            }
             finishTurn();
           },
           onError: (message) => {
-            openAgentLine();
             output.write(`\n${c.err}${message}${c.reset}`);
             finishTurn();
           },
         });
       } catch (err) {
-        spinner.stop();
-        activeSpinner = undefined;
+        turn.end();
+        activeTurn = undefined;
         streaming = false;
         currentChatId = undefined;
         resumeInput();
@@ -345,8 +390,7 @@ async function main(): Promise<void> {
         output.write(`${c.err}${msg}${c.reset}\n\n`);
         prompt();
       }
-    })();
-  });
+  }
 
   rl.on("close", () => {
     client.close();
