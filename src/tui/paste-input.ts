@@ -44,13 +44,12 @@ export function createPasteAwareInput(
         if (start === -1) {
           // Non-bracketed multiline paste: many terminals deliver the whole
           // clipboard in one burst that contains newline characters.
-          if (rest.includes("\r\n") || (rest.includes("\n") && rest.length > 1)) {
-            const normalized = rest.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-            if (normalized.includes("\n")) {
-              rest = "";
-              options.onPaste(normalized.replace(/\n$/, ""));
-              break;
-            }
+          const normalized = rest.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+          const inner = normalized.replace(/\n$/, "");
+          if (inner.includes("\n")) {
+            rest = "";
+            options.onPaste(inner);
+            break;
           }
           filtered.write(rest);
           rest = "";
@@ -79,10 +78,11 @@ export function createPasteAwareInput(
       const text = pasteBuf.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       pasteBuf = "";
 
-      if (text.includes("\n")) {
-        options.onPaste(text);
+      const inner = text.replace(/\n$/, "");
+      if (inner.includes("\n")) {
+        options.onPaste(inner);
       } else if (text.length > 0) {
-        filtered.write(text);
+        filtered.write(text.replace(/\n$/, ""));
       }
     }
   });

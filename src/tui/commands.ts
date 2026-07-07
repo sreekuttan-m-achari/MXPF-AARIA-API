@@ -49,3 +49,27 @@ export function looksLikeCommand(text: string): boolean {
 export function isMemoryCommand(text: string): boolean {
   return text.toLowerCase().startsWith("/memory");
 }
+
+const EXACT_COMMANDS = new Set([
+  "/help",
+  "/health",
+  "/cancel",
+  "/quit",
+  "/exit",
+]);
+
+/** True for built-in slash commands (exact or /memory …). */
+export function isBuiltinCommand(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) {
+    return false;
+  }
+  const lower = trimmed.toLowerCase();
+  if (EXACT_COMMANDS.has(lower)) {
+    return true;
+  }
+  if (isMemoryCommand(trimmed)) {
+    return true;
+  }
+  return looksLikeCommand(trimmed);
+}

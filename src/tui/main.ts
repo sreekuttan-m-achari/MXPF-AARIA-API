@@ -6,6 +6,7 @@ import { ensureServerReady, fetchHealth, systemdServiceName, type Health } from 
 import { AriaWsClient } from "./client.js";
 import {
   completeLine,
+  isBuiltinCommand,
   isMemoryCommand,
   looksLikeCommand,
   matchCommands,
@@ -114,11 +115,18 @@ async function main(): Promise<void> {
 
   const interactive = Boolean(input.isTTY && output.isTTY);
 
+  let dispatchInput: ((text: string) => void) | undefined;
+
   const ttyInput = interactive
     ? createPasteAwareInput(input, output, {
         onPaste: (text) => {
           const trimmed = text.trim();
           if (!trimmed) {
+            return;
+          }
+          // Slash commands should run immediately, not enter paste-draft mode.
+          if (!trimmed.includes("\n") && isBuiltinCommand(trimmed)) {
+            dispatchInput?.(trimmed);
             return;
           }
           const lines = trimmed.split("\n").length;
@@ -507,6 +515,10 @@ async function main(): Promise<void> {
       prompt();
     }
   }
+
+  dispatchInput = (text) => {
+    void processUserInput(text);
+  };
 
   rl.on("close", () => {
     client.close();
