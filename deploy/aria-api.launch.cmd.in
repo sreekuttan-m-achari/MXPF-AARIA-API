@@ -1,0 +1,7 @@
+@echo off
+rem ARIA API launcher — generated pattern (see install-service.ps1).
+rem Template placeholders: __SERVER_DIR__ __NODE__ __TSX__
+setlocal EnableExtensions
+set "ARIA_ROOT=__SERVER_DIR__"
+cd /d "%ARIA_ROOT%"
+"__NODE__" "__TSX__" "%ARIA_ROOT%\src\main.ts"

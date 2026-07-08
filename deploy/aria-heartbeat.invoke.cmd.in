@@ -1,0 +1,3 @@
+# Equivalent to deploy/aria-heartbeat.service.in (oneshot heartbeat POST).
+# Placeholder __AARIA_API_URL__ is resolved at install time; prefer invoke-heartbeat.ps1 (reads .env).
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-RestMethod -Method Post -Uri '__AARIA_API_URL__/jobs/run' -ContentType 'application/json' -Body '{\"id\":\"heartbeat\"}'"

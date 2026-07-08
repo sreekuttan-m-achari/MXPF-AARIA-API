@@ -115,10 +115,17 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 Clone/enter the project, then choose **host** or **Docker**.
 
 **Quick path (recommended):** run the guided installer — prerequisites, `.env`, persona
-files, CLI, systemd service, and health checks in one flow:
+files, CLI, background service, and health checks in one flow:
 
 ```bash
+# Linux / macOS
 bash deploy/install-upgrade.sh
+```
+
+```powershell
+# Windows (PowerShell 5.1+)
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy\install-upgrade.ps1
+# or: npm run install:win
 ```
 
 ### 1. Configure (manual alternative)
@@ -154,6 +161,42 @@ Install the `aaria` terminal command:
 npm run install-cli             # symlinks aaria → ~/.local/bin/aaria
 aaria                           # opens the TUI (auto-starts the service if down)
 ```
+
+### 2a-win. Run on Windows (host)
+
+Requires **Node.js ≥ 22.13**, **Windows Terminal** (recommended), and PowerShell 5.1+.
+
+```powershell
+# Guided install (recommended)
+npm run install:win
+
+# Or step by step:
+npm install
+copy .env-sample .env          # set CURSOR_API_KEY
+copy SOUL.sample.md SOUL.md
+copy USER.sample.md USER.md
+copy MEMORY.sample.md MEMORY.md
+npm run install-cli:win        # aaria → %USERPROFILE%\.local\bin
+npm run install-service:win    # optional: ARIA-API scheduled task at logon
+npm run install-heartbeat:win  # optional: external heartbeat every 5m
+
+npm start                      # foreground API on http://127.0.0.1:8788
+aaria                          # TUI (new terminal after PATH update)
+```
+
+| Linux | Windows |
+|-------|---------|
+| `bash deploy/install-upgrade.sh` | `npm run install:win` |
+| `bash deploy/install-service.sh` | `npm run install-service:win` |
+| `bash deploy/install-heartbeat-timer.sh` | `npm run install-heartbeat:win` |
+| `npm run install-cli` | `npm run install-cli:win` |
+| `systemctl --user start aria-api.service` | `Start-ScheduledTask -TaskName ARIA-API` |
+| `systemctl --user status aria-heartbeat.timer` | `Get-ScheduledTask -TaskName ARIA-Heartbeat` |
+| `journalctl --user -u aria-api.service -f` | Task Scheduler → **ARIA-API** history |
+| `~/.local/bin` on PATH | `%USERPROFILE%\.local\bin` on user PATH |
+
+> **Note:** The TUI's auto-start of `aria-api.service` is Linux/systemd only. On Windows,
+> use the scheduled task from `install-service.ps1` or run `npm start` before `aaria`.
 
 ### 2b. Run with Docker
 
@@ -272,7 +315,7 @@ Schedule each job with **either** `every` (e.g. `"5m"`, `"30s"`, `"1h"`) **or** 
 
 **API:** `GET /jobs`, `POST /jobs/run`, `POST /jobs/reload`, `GET /heartbeat`. Last heartbeat is also included in `GET /health`.
 
-**Optional external watchdog:** `bash deploy/install-heartbeat-timer.sh` installs a systemd user timer that `curl`s `POST /jobs/run` every 5 minutes — useful if you want a check outside the Node process. The in-process scheduler is usually enough.
+**Optional external watchdog:** `bash deploy/install-heartbeat-timer.sh` (Linux) or `npm run install-heartbeat:win` (Windows) installs an external trigger that `POST`s `/jobs/run` with `id=heartbeat` every 5 minutes — useful if you want a check outside the Node process. The in-process scheduler is usually enough.
 
 ### Learn loop (Phase 1–2)
 
@@ -335,14 +378,20 @@ auto-starts `aria-api.service` and waits for it to warm up (host installs only).
 
 ```
 MXPF-AARIA-API/
-├── bin/aaria                 # TUI launcher (resolves Node/tsx, then runs the client)
+├── bin/aaria                 # TUI launcher (bash; Linux/macOS)
+├── bin/aaria.cmd             # TUI launcher (Windows)
 ├── deploy/
-│   ├── aria-api.service.in   # systemd user-unit template
-│   ├── aria-heartbeat.*.in   # optional external heartbeat timer
-│   ├── install-service.sh    # installs + starts the service
-│   ├── install-heartbeat-timer.sh
-│   ├── install-upgrade.sh    # guided interactive install / upgrade
-│   └── install-cli.sh        # symlinks `aaria` into ~/.local/bin
+│   ├── README.md               # Linux ↔ Windows deploy parity table
+│   ├── aria-api.service.in     # systemd user-unit template (Linux)
+│   ├── aria-api.launch.cmd.in  # API launch template (Windows)
+│   ├── aria-heartbeat.*.in     # optional external heartbeat (Linux)
+│   ├── aria-heartbeat.invoke.cmd.in
+│   ├── _windows.ps1            # shared PowerShell helpers
+│   ├── invoke-heartbeat.ps1    # heartbeat POST (Windows)
+│   ├── install-service.sh / install-service.ps1
+│   ├── install-heartbeat-timer.sh / install-heartbeat-timer.ps1
+│   ├── install-upgrade.sh / install-upgrade.ps1
+│   └── install-cli.sh / install-cli.ps1
 ├── scripts/ha-rest-mcp.mjs   # Home Assistant REST MCP server
 ├── src/
 │   ├── main.ts               # entrypoint (boot → warmup → serve)
