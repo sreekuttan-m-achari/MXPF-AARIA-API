@@ -60,6 +60,7 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 | **Chat** | `src/chat.ts`, `src/stream.ts`, `src/runs.ts` | Turn handling and token streaming |
 | **Persona** | `src/persona.ts` | Loads `SOUL.md` / `USER.md` / `MEMORY.md`, working dir |
 | **Learn loop** | `src/learn/*.ts` | Post-turn review → `MEMORY.md` / `USER.md` (Hermes-style) |
+| **Scheduler** | `src/scheduler/*.ts` | Heartbeat, interval/cron jobs, `/jobs` API |
 | **MCP** | `src/config/mcp.ts` | Loads `.cursor/mcp.json` tool servers |
 | **TUI** | `src/tui/*.ts` | `aaria` terminal client (REPL, completion, auto-start) |
 | **Deploy** | `deploy/*`, `bin/aaria` | systemd unit + CLI installer |
@@ -68,7 +69,11 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET`  | `/health` | Status: name, version, session id, warm flag, greeting, persona/MCP/memory stats |
+| `GET`  | `/health` | Status: name, version, session id, warm flag, greeting, persona/MCP/memory stats, scheduler summary |
+| `GET`  | `/heartbeat` | Last in-process heartbeat snapshot (RAM, load, warnings) |
+| `GET`  | `/jobs` | All configured jobs with last/next run state |
+| `POST` | `/jobs/run` | `{ "id": "heartbeat" }` — run a job immediately |
+| `POST` | `/jobs/reload` | Reload `jobs.json` without restarting the service |
 | `GET`  | `/memory/pending` | Staged learn entries (when `AARIA_LEARN_APPROVAL=1`) |
 | `POST` | `/memory/approve` | `{ "id": "abc" \| "all" }` — apply staged entries |
 | `POST` | `/memory/reject` | `{ "id": "abc" \| "all" }` — discard staged entries |
@@ -91,6 +96,7 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 - `@cursor/sdk` — agent runtime
 - `@modelcontextprotocol/sdk`, `@modelcontextprotocol/server-memory` — MCP + bundled memory server
 - `ws` — WebSocket server
+- `node-cron` — cron expressions for scheduled jobs
 - `dotenv` — env loading
 - `zod` — validation
 - dev: `tsx` (runs the TS sources), `typescript`, `@types/*`
@@ -108,7 +114,14 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 
 Clone/enter the project, then choose **host** or **Docker**.
 
-### 1. Configure
+**Quick path (recommended):** run the guided installer — prerequisites, `.env`, persona
+files, CLI, systemd service, and health checks in one flow:
+
+```bash
+bash deploy/install-upgrade.sh
+```
+
+### 1. Configure (manual alternative)
 
 ```bash
 cp .env-sample .env
@@ -200,6 +213,66 @@ All settings are environment variables (see `.env-sample`). Common ones:
 | `AARIA_LEARN_APPROVAL` | off | Stage learn writes; approve in TUI with `/memory approve` |
 | `AARIA_MEMORY_CHAR_LIMIT` | `2200` | Max chars in `MEMORY.md` |
 | `AGENT_MEMORY_PATH` | `./MEMORY.md` | Agent memory file |
+| `AARIA_SCHEDULER` | on | In-process job scheduler (set `0` to disable) |
+| `AARIA_JOBS_PATH` | `./jobs.json` | Job definitions (see `jobs.sample.json`) |
+| `AARIA_HEARTBEAT` | on | Built-in heartbeat when `jobs.json` is absent |
+| `AARIA_HEARTBEAT_EVERY` | `5m` | Default heartbeat interval (`30s`, `5m`, `1h`, …) |
+| `AARIA_MORNING_BRIEF` | on | First WebSocket connect each day triggers a morning brief |
+| `AARIA_TIMEZONE` | — | Override `USER.md` timezone for daily brief (default `Asia/Kolkata`) |
+
+### Morning brief (first connect)
+
+On the **first WebSocket connection each calendar day** (user timezone from `USER.md`, or `AARIA_TIMEZONE`), AARIA runs a short agent turn and pushes a **morning brief** over the socket (`brief` / `brief_chunk` messages). The TUI shows it right after the greeting.
+
+- Delivery state is stored under the session dir (`morning-brief-date.txt`) — reconnecting the same day does not repeat it.
+- Uses host snapshot (RAM, load) from the heartbeat collector; no learn review on brief turns.
+- Disable with `AARIA_MORNING_BRIEF=0`.
+
+This is separate from the optional **scheduled** `morning-brief` prompt job in `jobs.json` (cron at a fixed time).
+
+### Scheduler (heartbeat + cron jobs)
+
+ARIA runs a lightweight in-process scheduler when `AARIA_SCHEDULER` is on (default).
+
+**Without `jobs.json`:** a built-in **heartbeat** runs every `AARIA_HEARTBEAT_EVERY` (default `5m`). It logs host RAM/load and records warnings when memory or load is high.
+
+**With `jobs.json`:** copy `jobs.sample.json` → `jobs.json` and edit. Two job types:
+
+| Type | Purpose |
+|------|---------|
+| `heartbeat` | Self-check (RAM, load, warm status) — logs to journal |
+| `prompt` | Runs an agent turn on a schedule (e.g. morning brief) |
+
+Schedule each job with **either** `every` (e.g. `"5m"`, `"30s"`, `"1h"`) **or** `cron` (standard 5-field expression, optional `timezone`).
+
+```json
+{
+  "jobs": [
+    {
+      "id": "heartbeat",
+      "type": "heartbeat",
+      "enabled": true,
+      "schedule": { "every": "5m" }
+    },
+    {
+      "id": "morning-brief",
+      "type": "prompt",
+      "enabled": true,
+      "schedule": { "cron": "0 9 * * *", "timezone": "Asia/Kolkata" },
+      "message": "Brief morning work-desk status — 3–5 bullets.",
+      "skipIfBusy": true,
+      "learn": false
+    }
+  ]
+}
+```
+
+- **`skipIfBusy`** (prompt jobs, default `true`) — skips the run if chat/learn work is queued (RAM-friendly on constrained hosts).
+- **`learn`** (prompt jobs, default `false`) — when `false`, scheduled turns do not trigger the post-turn learn review.
+
+**API:** `GET /jobs`, `POST /jobs/run`, `POST /jobs/reload`, `GET /heartbeat`. Last heartbeat is also included in `GET /health`.
+
+**Optional external watchdog:** `bash deploy/install-heartbeat-timer.sh` installs a systemd user timer that `curl`s `POST /jobs/run` every 5 minutes — useful if you want a check outside the Node process. The in-process scheduler is usually enough.
 
 ### Learn loop (Phase 1–2)
 
@@ -265,7 +338,10 @@ MXPF-AARIA-API/
 ├── bin/aaria                 # TUI launcher (resolves Node/tsx, then runs the client)
 ├── deploy/
 │   ├── aria-api.service.in   # systemd user-unit template
+│   ├── aria-heartbeat.*.in   # optional external heartbeat timer
 │   ├── install-service.sh    # installs + starts the service
+│   ├── install-heartbeat-timer.sh
+│   ├── install-upgrade.sh    # guided interactive install / upgrade
 │   └── install-cli.sh        # symlinks `aaria` into ~/.local/bin
 ├── scripts/ha-rest-mcp.mjs   # Home Assistant REST MCP server
 ├── src/
@@ -273,7 +349,9 @@ MXPF-AARIA-API/
 │   ├── ws.ts                 # HTTP + WebSocket server
 │   ├── agent-*.ts, chat.ts, stream.ts, runs.ts, session.ts
 │   ├── persona.ts, warmup.ts, config/mcp.ts, debug.ts, errors.ts
+│   ├── scheduler/            # heartbeat + cron/interval jobs
 │   └── tui/                  # terminal client (main, client, commands, spinner, theme, bootstrap, config)
+├── jobs.sample.json          # scheduler job definitions (copy → jobs.json)
 ├── SOUL.sample.md / USER.sample.md
 ├── .env-sample
 ├── .cursor/mcp.json.sample

@@ -100,6 +100,49 @@ function buildBootstrapUserMessage(
   return parts.join("\n");
 }
 
+const DEFAULT_TIMEZONE = "Asia/Kolkata";
+
+/** IANA timezone from USER.md `**Timezone:**` or `AARIA_TIMEZONE`. */
+export function userTimezone(cwd: string = agentCwd()): string {
+  const override = process.env.AARIA_TIMEZONE?.trim();
+  if (override) return override;
+
+  const text = loadUserMarkdown(cwd);
+  if (text) {
+    const match = text.match(/^\s*\*{0,2}\s*timezone\s*\*{0,2}\s*:\s*(.+)$/im);
+    if (match) {
+      const tz = match[1].replace(/\*/g, "").trim();
+      if (tz.length > 0) return tz;
+    }
+  }
+
+  return DEFAULT_TIMEZONE;
+}
+
+export function buildMorningBriefPrompt(
+  userContext?: string,
+  hostContext?: string,
+  timezone?: string,
+): string {
+  const parts = [
+    "First connection of the day on the ARIA work desk — deliver a concise morning brief.",
+    "Format: short opener (one line), then 3–5 bullets.",
+    "Cover: host health (if provided), session readiness, anything useful from user/memory context, one practical focus for today.",
+    "FRIDAY tone: calm, operational, no fluff. Use the user's name if known.",
+    "No tools unless something is critically wrong. Stay under ~120 words.",
+  ];
+  if (timezone?.trim()) {
+    parts.push("", `Local date context: ${timezone.trim()}`);
+  }
+  if (hostContext?.trim()) {
+    parts.push("", "## Host snapshot", "", hostContext.trim());
+  }
+  if (userContext?.trim()) {
+    parts.push("", "## User context", "", userContext.trim());
+  }
+  return parts.join("\n");
+}
+
 export function buildGreetingPrompt(userContext?: string): string {
   const parts = [
     "The user just opened the ARIA work desktop (professional lane).",

@@ -1,0 +1,8 @@
+[Unit]
+Description=ARIA external heartbeat trigger (optional)
+After=network-online.target aria-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/curl -sf -X POST __AARIA_API_URL__/jobs/run -H "Content-Type: application/json" -d '{"id":"heartbeat"}'

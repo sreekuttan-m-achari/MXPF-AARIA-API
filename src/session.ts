@@ -34,3 +34,7 @@ export function clearPersistedAgentId(cwd: string): void {
     writeFileSync(path, "", "utf8");
   }
 }
+
+export function morningBriefDatePath(cwd: string): string {
+  return join(sessionDir(cwd), "morning-brief-date.txt");
+}

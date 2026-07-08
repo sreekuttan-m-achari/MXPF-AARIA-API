@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-export type ConversationTransport = "http" | "http-stream" | "ws";
+export type ConversationTransport = "http" | "http-stream" | "ws" | "job" | "brief";
 
 export type ConversationLogEntry = {
   transport: ConversationTransport;

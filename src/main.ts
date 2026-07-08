@@ -4,6 +4,7 @@ import { initAgent, shutdownAgent } from "./agent-manager.js";
 import { cancelStaleRuns } from "./agent-busy.js";
 import { agentCwd } from "./persona.js";
 import { logDebugStartup } from "./debug.js";
+import { startScheduler, stopScheduler } from "./scheduler/index.js";
 import { startServer } from "./ws.js";
 import { startWarmup } from "./warmup.js";
 
@@ -15,9 +16,11 @@ if (cleared > 0) {
   console.error(`[aria-agent] Cleared ${cleared} stale run(s) from prior session`);
 }
 startWarmup(agent);
+startScheduler(agent);
 
 try {
   await startServer(agent);
 } finally {
+  stopScheduler();
   await shutdownAgent();
 }

@@ -1,0 +1,22 @@
+{
+  "jobs": [
+    {
+      "id": "heartbeat",
+      "type": "heartbeat",
+      "enabled": true,
+      "schedule": { "every": "5m" }
+    },
+    {
+      "id": "morning-brief",
+      "type": "prompt",
+      "enabled": false,
+      "schedule": {
+        "cron": "0 9 * * *",
+        "timezone": "Asia/Kolkata"
+      },
+      "message": "Scheduled morning brief: 3–5 bullets on work-desk status and anything needing attention. No tools unless critical.",
+      "skipIfBusy": true,
+      "learn": false
+    }
+  ]
+}

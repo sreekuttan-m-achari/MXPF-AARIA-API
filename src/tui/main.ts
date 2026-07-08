@@ -77,6 +77,29 @@ async function main(): Promise<void> {
 
   const client = new AriaWsClient();
   let userName: string | undefined;
+  let briefStreaming = false;
+
+  client.onMorningBrief({
+    onChunk: (text) => {
+      if (!briefStreaming) {
+        briefStreaming = true;
+        output.write(`\n${agentPrefix()}${c.bold}Morning brief${c.reset}\n`);
+      }
+      output.write(text);
+    },
+    onBrief: (text) => {
+      if (!briefStreaming) {
+        output.write(`\n${agentPrefix()}${c.bold}Morning brief${c.reset}\n${text.trim()}\n\n`);
+      } else {
+        output.write("\n\n");
+      }
+      briefStreaming = false;
+      if (!streaming) {
+        prompt();
+      }
+    },
+  });
+
   client.onLearned((event) => {
     if (closed) {
       return;
@@ -106,6 +129,9 @@ async function main(): Promise<void> {
     } else if (!health.warm) {
       output.write(`${c.dim}Warming up…${c.reset}\n\n`);
     }
+    if (ready.morningBrief === "pending") {
+      output.write(`${c.dim}Preparing morning brief…${c.reset}\n\n`);
+    }
   } catch (err) {
     loader.stop();
     const msg = err instanceof Error ? err.message : String(err);
@@ -117,7 +143,7 @@ async function main(): Promise<void> {
 
   let dispatchInput: ((text: string) => void) | undefined;
 
-  const ttyInput = interactive
+  const readlineInput = interactive
     ? createPasteAwareInput(input, output, {
         onPaste: (text) => {
           const trimmed = text.trim();
@@ -141,7 +167,7 @@ async function main(): Promise<void> {
     : input;
 
   const rl = readline.createInterface({
-    input: ttyInput,
+    input: readlineInput,
     output,
     terminal: true,
     completer: completeLine,
@@ -155,31 +181,16 @@ async function main(): Promise<void> {
 
   let hintVisible = false;
 
-  // While the agent is working we detach readline's key handling so keystrokes
-  // are not echoed into the agent's output and stray Enters don't redraw the
-  // `you ›` prompt mid-reply. Only Ctrl+C is honoured (to cancel). Readline's
-  // own listeners are restored verbatim when the turn ends.
+  // While the agent is working, pause readline so keystrokes are not echoed and
+  // stray Enters do not redraw the prompt mid-reply. Ctrl+C still routes via SIGINT.
   let inputSuspended = false;
-  let savedKeypressListeners: ((...args: unknown[]) => void)[] = [];
-
-  const streamKeypress = (_str: string | undefined, key: { name?: string; ctrl?: boolean } | undefined): void => {
-    if (key?.ctrl && key.name === "c") {
-      if (currentChatId) {
-        output.write(`\n${c.dim}cancelling…${c.reset}\n`);
-        client.cancel(currentChatId);
-      }
-    }
-    // Every other key is intentionally swallowed while the agent is working.
-  };
 
   const suspendInput = (): void => {
     if (!interactive || inputSuspended) {
       return;
     }
     inputSuspended = true;
-    savedKeypressListeners = input.listeners("keypress") as typeof savedKeypressListeners;
-    input.removeAllListeners("keypress");
-    input.on("keypress", streamKeypress);
+    rl.pause();
   };
 
   const resumeInput = (): void => {
@@ -187,11 +198,7 @@ async function main(): Promise<void> {
       return;
     }
     inputSuspended = false;
-    input.removeListener("keypress", streamKeypress);
-    for (const listener of savedKeypressListeners) {
-      input.on("keypress", listener);
-    }
-    savedKeypressListeners = [];
+    rl.resume();
   };
 
   // Render a dim suggestion line just below the prompt while typing a command.
@@ -227,9 +234,8 @@ async function main(): Promise<void> {
   };
 
   if (interactive) {
-    // Runs before readline's own handler: clear the hint on Enter so it does
-    // not linger on the submitted line; otherwise refresh after the keystroke.
-    input.prependListener("keypress", (_str, key) => {
+    // readline listens on readlineInput (not raw stdin); hints must attach there too.
+    readlineInput.prependListener("keypress", (_str, key) => {
       if (draftMessage && key?.name === "escape") {
         draftMessage = null;
         continuation = "";

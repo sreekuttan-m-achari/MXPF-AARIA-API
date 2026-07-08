@@ -8,17 +8,57 @@ export type PasteInputOptions = {
   onPaste: (text: string) => void;
 };
 
+type TtyReadable = Readable & {
+  isTTY?: boolean;
+  isRaw?: boolean;
+  setRawMode?: (mode: boolean) => TtyReadable;
+  columns?: number;
+  rows?: number;
+};
+
+/** readline needs isTTY + setRawMode on its input stream for Tab completion. */
+function forwardTty(input: TtyReadable, filtered: PassThrough): TtyReadable {
+  const out = filtered as PassThrough & TtyReadable;
+  if (!input.isTTY) {
+    return out;
+  }
+
+  out.isTTY = true;
+  if (input.columns !== undefined) out.columns = input.columns;
+  if (input.rows !== undefined) out.rows = input.rows;
+
+  if (typeof input.setRawMode === "function") {
+    out.setRawMode = (mode: boolean) => {
+      input.setRawMode!(mode);
+      return out;
+    };
+    Object.defineProperty(out, "isRaw", {
+      get: () => input.isRaw,
+      configurable: true,
+    });
+  }
+
+  input.on("resize", () => {
+    if (input.columns !== undefined) out.columns = input.columns;
+    if (input.rows !== undefined) out.rows = input.rows;
+    filtered.emit("resize");
+  });
+
+  return out;
+}
+
 /**
  * Wraps a TTY stdin stream so bracketed-paste blobs are delivered whole instead
  * of being split across readline "line" events. Enables bracketed paste mode on
  * the paired output stream when it is a TTY.
  */
 export function createPasteAwareInput(
-  input: Readable & { isTTY?: boolean },
+  input: TtyReadable,
   output: Writable & { isTTY?: boolean },
   options: PasteInputOptions,
-): Readable {
-  const filtered = new PassThrough();
+): TtyReadable {
+  const pass = new PassThrough();
+  const filtered = forwardTty(input, pass);
   let inPaste = false;
   let pasteBuf = "";
 
@@ -51,12 +91,12 @@ export function createPasteAwareInput(
             options.onPaste(inner);
             break;
           }
-          filtered.write(rest);
+          pass.write(rest);
           rest = "";
           break;
         }
         if (start > 0) {
-          filtered.write(rest.slice(0, start));
+          pass.write(rest.slice(0, start));
         }
         rest = rest.slice(start + PASTE_START.length);
         inPaste = true;
@@ -82,13 +122,13 @@ export function createPasteAwareInput(
       if (inner.includes("\n")) {
         options.onPaste(inner);
       } else if (text.length > 0) {
-        filtered.write(text.replace(/\n$/, ""));
+        pass.write(text.replace(/\n$/, ""));
       }
     }
   });
 
-  input.on("end", () => filtered.end());
-  input.on("error", (err) => filtered.destroy(err));
+  input.on("end", () => pass.end());
+  input.on("error", (err) => pass.destroy(err));
 
   return filtered;
 }

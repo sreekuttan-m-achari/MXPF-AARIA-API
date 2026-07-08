@@ -3,8 +3,10 @@ import WebSocket from "ws";
 import { wsUrl } from "./config.js";
 
 type Outbound =
-  | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string; userName?: string }
+  | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string; userName?: string; morningBrief?: "pending" | "skip" }
   | { type: "greeting"; text: string }
+  | { type: "brief"; text: string }
+  | { type: "brief_chunk"; text: string }
   | { type: "pong" }
   | { type: "chunk"; id: string; text: string }
   | { type: "done"; id: string; reply: string }
@@ -17,6 +19,11 @@ type Outbound =
       staged?: boolean;
       pendingId?: string;
     };
+
+export type MorningBriefHandler = {
+  onChunk?: (text: string) => void;
+  onBrief: (text: string) => void;
+};
 
 export type LearnedEvent = Extract<Outbound, { type: "learned" }>;
 
@@ -34,8 +41,14 @@ export class AriaWsClient {
   private chatId = 0;
   private activeHandlers: ChatHandlers | undefined;
   private learnHandler: LearnHandler | undefined;
+  private morningBriefHandler: MorningBriefHandler | undefined;
 
-  async connect(): Promise<{ greeting?: string; warm?: boolean; userName?: string }> {
+  async connect(): Promise<{
+    greeting?: string;
+    warm?: boolean;
+    userName?: string;
+    morningBrief?: "pending" | "skip";
+  }> {
     const url = wsUrl();
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
@@ -60,11 +73,26 @@ export class AriaWsClient {
 
         if (msg.type === "ready") {
           clearTimeout(timeout);
-          resolve({ greeting: msg.greeting, warm: msg.warm, userName: msg.userName });
+          resolve({
+            greeting: msg.greeting,
+            warm: msg.warm,
+            userName: msg.userName,
+            morningBrief: msg.morningBrief,
+          });
           return;
         }
 
         if (msg.type === "greeting") {
+          return;
+        }
+
+        if (msg.type === "brief_chunk" && this.morningBriefHandler?.onChunk) {
+          this.morningBriefHandler.onChunk(msg.text);
+          return;
+        }
+
+        if (msg.type === "brief" && this.morningBriefHandler) {
+          this.morningBriefHandler.onBrief(msg.text);
           return;
         }
 
@@ -117,6 +145,10 @@ export class AriaWsClient {
 
   onLearned(handler: LearnHandler): void {
     this.learnHandler = handler;
+  }
+
+  onMorningBrief(handler: MorningBriefHandler): void {
+    this.morningBriefHandler = handler;
   }
 
   sendChat(message: string, handlers: ChatHandlers): string {

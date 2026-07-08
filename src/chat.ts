@@ -10,6 +10,10 @@ import { scheduleLearnReview } from "./learn/review.js";
 import { waitForWarmup } from "./warmup.js";
 import { isRecoverableRunError, runChatTurn } from "./stream.js";
 
+export type ChatTurnOptions = {
+  learn?: boolean;
+};
+
 export async function handleChatTurn(
   agent: AriaAgent,
   transport: ConversationTransport,
@@ -17,6 +21,7 @@ export async function handleChatTurn(
   message: string,
   onChunk?: (text: string) => void,
   allowSessionReset = true,
+  options?: ChatTurnOptions,
 ): Promise<string> {
   await waitForWarmup();
   const started = Date.now();
@@ -37,7 +42,9 @@ export async function handleChatTurn(
       reply,
       durationMs: Date.now() - started,
     });
-    scheduleLearnReview(agent, message, reply);
+    if (options?.learn !== false) {
+      scheduleLearnReview(agent, message, reply);
+    }
     return reply;
   } catch (err) {
     if (isChatCancelled(err)) {
@@ -63,6 +70,7 @@ export async function handleChatTurn(
         message,
         onChunk,
         false,
+        options,
       );
     }
     const error = err instanceof Error ? err.message : String(err);

@@ -21,6 +21,18 @@ import { onLearnNotification } from "./learn/notify.js";
 import { learnReviewEnabled } from "./learn/review.js";
 import { personaStatus, userCallName } from "./persona.js";
 import { cancelActiveRun } from "./runs.js";
+import {
+  deliverMorningBriefIfDue,
+  isMorningBriefInFlight,
+  morningBriefStatus,
+} from "./morning-brief.js";
+import {
+  getLastHeartbeat,
+  listJobStates,
+  reloadScheduler,
+  schedulerStatus,
+  triggerJob,
+} from "./scheduler/index.js";
 import { getGreeting, isWarm, onGreetingReady } from "./warmup.js";
 
 type Inbound =
@@ -29,8 +41,10 @@ type Inbound =
   | { type: "ping" };
 
 type Outbound =
-  | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string; userName?: string }
+  | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string; userName?: string; morningBrief?: "pending" | "skip" }
   | { type: "greeting"; text: string }
+  | { type: "brief"; text: string }
+  | { type: "brief_chunk"; text: string }
   | { type: "pong" }
   | { type: "chunk"; id: string; text: string }
   | { type: "done"; id: string; reply: string }
@@ -120,6 +134,8 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         const greeting = getGreeting();
         const mcpServers = getMcpServerNames();
         const mem = memoryUsage();
+        const jobs = schedulerStatus();
+        const brief = morningBriefStatus();
         jsonResponse(res, 200, {
           ok: true,
           name: "ARIA",
@@ -139,6 +155,74 @@ export async function startServer(agent: AriaAgent): Promise<void> {
             loaded: mcpServers.length > 0,
             servers: mcpServers,
           },
+          scheduler: {
+            enabled: jobs.enabled,
+            started: jobs.started,
+            configPath: jobs.configPath,
+            jobCount: jobs.jobCount,
+            lastHeartbeat: jobs.lastHeartbeat,
+          },
+          morningBrief: brief,
+        });
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/heartbeat") {
+        const snapshot = getLastHeartbeat();
+        jsonResponse(res, 200, {
+          ok: true,
+          snapshot: snapshot ?? null,
+          scheduler: schedulerStatus(),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/jobs") {
+        jsonResponse(res, 200, {
+          ok: true,
+          scheduler: schedulerStatus(),
+          jobs: listJobStates(),
+        });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/jobs/reload") {
+        const result = reloadScheduler();
+        if (!result.ok) {
+          jsonResponse(res, 503, { ok: false, error: result.error });
+          return;
+        }
+        jsonResponse(res, 200, {
+          ok: true,
+          count: result.count,
+          jobs: listJobStates(),
+        });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/jobs/run") {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const id = (body as { id?: string }).id?.trim() ?? "";
+        if (!id) {
+          jsonResponse(res, 400, { error: "id is required" });
+          return;
+        }
+        const result = await triggerJob(id);
+        if (!result.ok) {
+          jsonResponse(res, 404, { ok: false, error: result.error });
+          return;
+        }
+        jsonResponse(res, 200, {
+          ok: true,
+          id,
+          result: result.result,
+          job: listJobStates().find((j) => j.id === id),
         });
         return;
       }
@@ -309,12 +393,29 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   const wss = new WebSocketServer({ server: httpServer });
 
   function sendReady(ws: WebSocket): void {
+    const brief = morningBriefStatus();
     send(ws, {
       type: "ready",
       warm: isWarm(),
       greeting: getGreeting(),
       sessionId: currentAgent().agentId,
       userName: userCallName(),
+      morningBrief: brief.due ? "pending" : "skip",
+    });
+  }
+
+  function scheduleMorningBrief(ws: WebSocket): void {
+    const brief = morningBriefStatus();
+    if (!brief.due && !isMorningBriefInFlight()) return;
+
+    void deliverMorningBriefIfDue(agent, (text) => {
+      for (const client of wss.clients) {
+        send(client, { type: "brief_chunk", text });
+      }
+    }).then((reply) => {
+      if (reply) {
+        send(ws, { type: "brief", text: reply });
+      }
     });
   }
 
@@ -333,6 +434,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
 
   wss.on("connection", (ws) => {
     sendReady(ws);
+    scheduleMorningBrief(ws);
 
     ws.on("message", (raw) => {
       void (async () => {
@@ -403,7 +505,8 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   });
 
   console.error(`[aria-server] ws://${host}:${port}`);
-  console.error(`[aria-server] GET /health  GET /memory/pending  POST /memory/approve  POST /memory/reject`);
+  console.error(`[aria-server] GET /health  GET /heartbeat  GET /jobs  POST /jobs/run  POST /jobs/reload`);
+  console.error(`[aria-server] GET /memory/pending  POST /memory/approve  POST /memory/reject`);
   console.error(`[aria-server] POST /chat  POST /chat/cancel  POST /chat/stream`);
 
   await new Promise<void>((resolve) => {
