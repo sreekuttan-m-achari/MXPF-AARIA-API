@@ -450,7 +450,11 @@ ensure_path_in_shell() {
 install_cli() {
   step "Step 6 · aaria CLI"
   hr
-  bash "$ROOT/deploy/install-cli.sh"
+  if ! bash "$ROOT/deploy/install-cli.sh"; then
+    warn "CLI symlink step failed — likely a permissions issue with the existing link."
+    warn "Fix with: sudo rm -f \"\$HOME/.local/bin/aaria\""
+    warn "Then re-run this script, or run: bash deploy/install-cli.sh"
+  fi
   ensure_path_in_shell
   export PATH="$HOME/.local/bin:$PATH"
   if command -v aaria >/dev/null 2>&1; then

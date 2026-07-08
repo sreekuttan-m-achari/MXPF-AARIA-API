@@ -17,9 +17,23 @@ if [[ ! -x "${ROOT}/node_modules/.bin/tsx" ]]; then
 fi
 
 mkdir -p "$BIN_DIR"
-ln -sf "$SOURCE" "$LINK"
 
-echo "Installed: $LINK"
+# If the link already resolves to the correct source, skip re-linking.
+if [[ -L "$LINK" ]] && [[ "$(readlink -f "$LINK" 2>/dev/null)" == "$(readlink -f "$SOURCE")" ]]; then
+  echo "Already linked: $LINK → $SOURCE"
+else
+  # Remove stale/wrong link first (may be owned by root — try, then warn).
+  if [[ -L "$LINK" ]] || [[ -e "$LINK" ]]; then
+    rm -f "$LINK" 2>/dev/null || {
+      echo "Warning: cannot remove existing $LINK (permission denied)." >&2
+      echo "Run once with sudo to fix: sudo rm -f $LINK && ln -sf $SOURCE $LINK" >&2
+      exit 1
+    }
+  fi
+  ln -sf "$SOURCE" "$LINK"
+  echo "Installed: $LINK → $SOURCE"
+fi
+
 echo ""
 echo "Ensure ~/.local/bin is on your PATH, then run:"
 echo "  aaria"
