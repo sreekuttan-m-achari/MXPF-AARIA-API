@@ -7,6 +7,15 @@
       "schedule": { "every": "5m" }
     },
     {
+      "id": "memory-curator",
+      "type": "curator",
+      "enabled": true,
+      "schedule": {
+        "cron": "0 3 * * *",
+        "timezone": "Asia/Kolkata"
+      }
+    },
+    {
       "id": "morning-brief",
       "type": "prompt",
       "enabled": false,

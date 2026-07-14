@@ -25,13 +25,13 @@ const BLOCKED_PATTERNS = [
   /cat\s+\.env\b/i,
 ];
 
-function memoryCharLimit(): number {
+export function memoryCharLimit(): number {
   const raw = process.env.AARIA_MEMORY_CHAR_LIMIT?.trim() || "2200";
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 200 ? n : 2200;
 }
 
-function userLearnedCharLimit(): number {
+export function userLearnedCharLimit(): number {
   const raw = process.env.AARIA_USER_LEARNED_CHAR_LIMIT?.trim() || "1375";
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 100 ? n : 1375;
@@ -266,4 +266,70 @@ export function memoryContextForReview(cwd: string = agentCwd()): {
     memoryEntries: loadMemoryEntries(cwd),
     userMarkdown: loadUserMarkdown(cwd),
   };
+}
+
+export function replaceMemoryEntries(
+  entries: string[],
+  cwd: string = agentCwd(),
+  header?: string,
+): void {
+  const path = resolveMemoryFilePath(cwd);
+  const resolvedHeader =
+    header ??
+    (existsSync(path)
+      ? parseMemoryEntries(readFileSync(path, "utf8")).header
+      : defaultHeader());
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const normalized = entry.trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(normalized);
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, serializeMemory(resolvedHeader, deduped), "utf8");
+}
+
+export function replaceUserLearnedEntries(
+  bullets: string[],
+  cwd: string = agentCwd(),
+): LearnWriteResult {
+  const path = resolveUserFilePath(cwd);
+  if (!path || !existsSync(path)) {
+    return { ok: false, error: "USER.md not found" };
+  }
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const bullet of bullets) {
+    const normalized = bullet.trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(normalized);
+  }
+
+  let text = readFileSync(path, "utf8");
+  const sectionIdx = text.indexOf(LEARNED_SECTION);
+  const lines = deduped.map((b) => `- ${b}`).join("\n");
+  const section = `${LEARNED_SECTION}\n${lines}\n`;
+
+  if (sectionIdx === -1) {
+    text = `${text.trimEnd()}\n\n${section}`;
+  } else {
+    const before = text.slice(0, sectionIdx).trimEnd();
+    text = `${before}\n\n${section}`;
+  }
+
+  const learnedPart = text.slice(text.indexOf(LEARNED_SECTION));
+  if (learnedPart.length > userLearnedCharLimit()) {
+    return { ok: false, error: "consolidated USER learned section still over limit" };
+  }
+
+  writeFileSync(path, text, "utf8");
+  return { ok: true, preview: `${deduped.length} bullets consolidated` };
 }

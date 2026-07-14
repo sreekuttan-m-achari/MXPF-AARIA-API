@@ -11,6 +11,7 @@ import {
   memoryFileExists,
   resolveMemoryFilePath,
 } from "./learn/memory-store.js";
+import { formatSkillsIndex } from "./skills/index.js";
 
 const DEFAULT_CANDIDATES = ["SOUL.md", "PROFILE.md"] as const;
 
@@ -67,6 +68,7 @@ function buildBootstrapUserMessage(
   persona: string,
   userContext?: string,
   memoryContext?: string,
+  skillsContext?: string,
 ): string {
   const parts = [
     "The following block is your standing persona and operating instructions for this entire session.",
@@ -85,6 +87,16 @@ function buildBootstrapUserMessage(
       "## Memory (from MEMORY.md)",
       "",
       memoryContext.trim(),
+    );
+  }
+  if (skillsContext?.trim()) {
+    parts.push(
+      "",
+      "---",
+      "",
+      "## Skills",
+      "",
+      skillsContext.trim(),
     );
   }
   if (userContext?.trim()) {
@@ -192,6 +204,7 @@ export async function bootstrapPersonaIfPresent(
   const memoryPath = resolveMemoryFilePath(cwd);
   const memoryEntries = loadMemoryEntries(cwd);
   const memoryContext = formatMemoryForPrompt(memoryEntries, cwd);
+  const skillsContext = formatSkillsIndex(cwd);
 
   if (soulOverride && !path) {
     console.error(
@@ -218,7 +231,7 @@ export async function bootstrapPersonaIfPresent(
 
   try {
     const run = await agent.send(
-      buildBootstrapUserMessage(persona, userContext, memoryContext),
+      buildBootstrapUserMessage(persona, userContext, memoryContext, skillsContext),
     );
     for await (const event of run.stream()) {
       collector.handleEvent(event);

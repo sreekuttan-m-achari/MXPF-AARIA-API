@@ -3,6 +3,7 @@ import { createAgent } from "./agent.js";
 import { cancelStaleRuns } from "./agent-busy.js";
 import { agentCwd } from "./persona.js";
 import { clearPersistedAgentId } from "./session.js";
+import { shutdownReviewAgent } from "./learn/review-agent.js";
 import { resetWarmup, startWarmup } from "./warmup.js";
 
 let agent: AriaAgent | undefined;
@@ -44,11 +45,13 @@ export async function resetAgentSession(): Promise<AriaAgent> {
 
 export async function shutdownAgent(): Promise<void> {
   if (!agent) {
+    await shutdownReviewAgent();
     return;
   }
   try {
     await agent[Symbol.asyncDispose]();
   } finally {
     agent = undefined;
+    await shutdownReviewAgent();
   }
 }

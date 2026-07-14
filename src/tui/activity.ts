@@ -1,6 +1,7 @@
 import { stdout as output } from "node:process";
 
 import { Spinner } from "./spinner.js";
+import { colorizeReplyChunk } from "./render.js";
 import { agentPrefix, c } from "./theme.js";
 
 /** Gap without streamed text before the working indicator reappears (tool runs, etc.). */
@@ -19,7 +20,7 @@ export class TurnActivity {
 
   constructor() {
     this.spinner = new Spinner((frame) =>
-      `${agentPrefix()}${c.dim}${frame} working… ${c.reset}${c.dim}(Ctrl+C to cancel)${c.reset}`,
+      `${agentPrefix()}${c.brand}${frame}${c.reset} ${c.gold}working…${c.reset} ${c.dim}(Ctrl+C to cancel)${c.reset}`,
     );
   }
 
@@ -44,7 +45,7 @@ export class TurnActivity {
       }
     }
 
-    output.write(text);
+    output.write(colorizeReplyChunk(text));
     this.opened = true;
     this.scheduleIdle();
   }

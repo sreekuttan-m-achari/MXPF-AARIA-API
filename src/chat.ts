@@ -7,6 +7,7 @@ import {
 } from "./debug.js";
 import { isChatCancelled } from "./errors.js";
 import { scheduleLearnReview } from "./learn/review.js";
+import { expandWithSkill } from "./skills/index.js";
 import { waitForWarmup } from "./warmup.js";
 import { isRecoverableRunError, runChatTurn } from "./stream.js";
 
@@ -25,10 +26,11 @@ export async function handleChatTurn(
 ): Promise<string> {
   await waitForWarmup();
   const started = Date.now();
+  const expanded = expandWithSkill(message);
   try {
     const reply = await runChatTurn(
       agent,
-      message,
+      expanded,
       (text) => {
         logStreamChunk(id, text);
         onChunk?.(text);

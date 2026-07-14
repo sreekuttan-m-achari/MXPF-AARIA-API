@@ -29,9 +29,17 @@ export const promptJobSchema = z.object({
   learn: z.boolean().default(false),
 });
 
+export const curatorJobSchema = z.object({
+  id: z.string().min(1),
+  type: z.literal("curator"),
+  enabled: z.boolean().default(true),
+  schedule: scheduleSchema,
+});
+
 export const jobSchema = z.discriminatedUnion("type", [
   heartbeatJobSchema,
   promptJobSchema,
+  curatorJobSchema,
 ]);
 
 export const jobsFileSchema = z.object({

@@ -8,6 +8,9 @@ import type { AriaAgent } from "./agent.js";
 import { handleChatTurn } from "./chat.js";
 import { getMcpServerNames } from "./config/mcp.js";
 import { isChatCancelled } from "./errors.js";
+import { curatorStatus, runCurator } from "./learn/curator.js";
+import { memoryUsage } from "./learn/memory-store.js";
+import { onLearnNotification } from "./learn/notify.js";
 import {
   approveAllPending,
   approvePending,
@@ -16,10 +19,9 @@ import {
   rejectAllPending,
   rejectPending,
 } from "./learn/pending.js";
-import { memoryUsage } from "./learn/memory-store.js";
-import { onLearnNotification } from "./learn/notify.js";
 import { learnReviewEnabled } from "./learn/review.js";
 import { personaStatus, userCallName } from "./persona.js";
+import { skillsStatus } from "./skills/index.js";
 import { cancelActiveRun } from "./runs.js";
 import {
   deliverMorningBriefIfDue,
@@ -52,7 +54,7 @@ type Outbound =
   | { type: "error"; id?: string; error: string }
   | {
       type: "learned";
-      target: "memory" | "user";
+      target: "memory" | "user" | "skill";
       preview: string;
       staged?: boolean;
       pendingId?: string;
@@ -136,6 +138,8 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         const mem = memoryUsage();
         const jobs = schedulerStatus();
         const brief = morningBriefStatus();
+        const curator = curatorStatus();
+        const skills = skillsStatus();
         jsonResponse(res, 200, {
           ok: true,
           name: "ARIA",
@@ -147,10 +151,15 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           userProfile: Boolean(persona.userPath),
           memory: Boolean(persona.memoryPath),
           user: userCallName(),
-          learn: { review: learnReviewEnabled() },
+          learn: {
+            review: learnReviewEnabled(),
+            model: process.env.AARIA_LEARN_MODEL?.trim() || "composer-2",
+            curator,
+          },
           memoryStats: persona.memoryPath
             ? { entries: mem.entries, chars: mem.chars, limit: mem.limit }
             : undefined,
+          skills,
           mcp: {
             loaded: mcpServers.length > 0,
             servers: mcpServers,
@@ -280,6 +289,26 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           return;
         }
         jsonResponse(res, 200, { ok: true, id });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/memory/curate") {
+        try {
+          const result = await enqueueAgentWork(() => runCurator());
+          if (!result.ok) {
+            jsonResponse(res, 500, { ok: false, error: result.error });
+            return;
+          }
+          jsonResponse(res, 200, result);
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { ok: false, error });
+        }
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/skills") {
+        jsonResponse(res, 200, { ok: true, skills: skillsStatus() });
         return;
       }
 
@@ -506,7 +535,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
 
   console.error(`[aria-server] ws://${host}:${port}`);
   console.error(`[aria-server] GET /health  GET /heartbeat  GET /jobs  POST /jobs/run  POST /jobs/reload`);
-  console.error(`[aria-server] GET /memory/pending  POST /memory/approve  POST /memory/reject`);
+  console.error(`[aria-server] GET /memory/pending  POST /memory/approve  POST /memory/reject  POST /memory/curate  GET /skills`);
   console.error(`[aria-server] POST /chat  POST /chat/cancel  POST /chat/stream`);
 
   await new Promise<void>((resolve) => {

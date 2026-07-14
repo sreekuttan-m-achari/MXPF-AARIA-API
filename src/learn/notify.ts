@@ -1,5 +1,5 @@
 export type LearnNotification = {
-  target: "memory" | "user";
+  target: "memory" | "user" | "skill";
   preview: string;
   staged?: boolean;
   pendingId?: string;

@@ -7,7 +7,9 @@ export type SlashCommand = {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/help", summary: "Show this help" },
   { name: "/health", summary: "Backend status" },
-  { name: "/memory", summary: "Memory learn loop (pending · approve · reject)" },
+  { name: "/memory", summary: "Memory learn loop (pending · approve · reject · curate)" },
+  { name: "/skills", summary: "List installed skills" },
+  { name: "/skill", summary: "Load a skill for the next turn (/skill <name> [prompt])" },
   { name: "/cancel", summary: "Cancel the current reply" },
   { name: "/quit", aliases: ["/exit"], summary: "Exit (also /exit, Ctrl+D)" },
 ];
@@ -50,6 +52,14 @@ export function isMemoryCommand(text: string): boolean {
   return text.toLowerCase().startsWith("/memory");
 }
 
+export function isSkillsCommand(text: string): boolean {
+  return text.toLowerCase() === "/skills";
+}
+
+export function isSkillCommand(text: string): boolean {
+  return /^\/skill\s+\S+/i.test(text.trim());
+}
+
 const EXACT_COMMANDS = new Set([
   "/help",
   "/health",
@@ -69,6 +79,9 @@ export function isBuiltinCommand(text: string): boolean {
     return true;
   }
   if (isMemoryCommand(trimmed)) {
+    return true;
+  }
+  if (isSkillsCommand(trimmed)) {
     return true;
   }
   return looksLikeCommand(trimmed);

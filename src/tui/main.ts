@@ -8,6 +8,7 @@ import {
   completeLine,
   isBuiltinCommand,
   isMemoryCommand,
+  isSkillsCommand,
   looksLikeCommand,
   matchCommands,
   SLASH_COMMANDS,
@@ -16,11 +17,12 @@ import { TurnActivity } from "./activity.js";
 import { apiBase } from "./config.js";
 import { BootLoader } from "./loader.js";
 import { createPasteAwareInput } from "./paste-input.js";
-import { agentPrefix, brandLine, c, formalTitleLine, userPrefix } from "./theme.js";
+import { agentPrefix, ariaWordmark, c, formalTitleLine, learnTargetStyle, userPrefix } from "./theme.js";
+import { colorizeCommandLine, colorizeReplyChunk } from "./render.js";
 
 function commandHelpLines(): string {
-  return SLASH_COMMANDS.map(
-    (cmd) => `  ${cmd.name.padEnd(10)}${cmd.summary}`,
+  return SLASH_COMMANDS.map((cmd) =>
+    colorizeCommandLine(cmd.name, cmd.summary),
   ).join("\n");
 }
 
@@ -28,22 +30,24 @@ function printHelp(): void {
   output.write(`
 ${formalTitleLine()}
 
-${c.bold}Commands${c.reset}
+${c.gold}${c.bold}Commands${c.reset}
 ${commandHelpLines()}
 
-${c.dim}Type / for command suggestions · Tab to complete.
+${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for command suggestions · Tab to complete.
 Paste multiple lines as one message · end a line with \\ to continue on the next.
 Talk naturally for work tasks — code, DevOps, servers, planning.
-Home and Home Assistant → Amelia.${c.reset}
+${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 
 `);
 }
 
 function printBanner(health: Health): void {
   output.write("\n");
-  output.write(`${brandLine(" AARIA ")} ${c.dim}work desk · ${apiBase()}${c.reset}\n`);
+  output.write(` ${ariaWordmark()} ${c.dim}work desk · ${c.teal}${apiBase()}${c.reset}\n`);
   if (health.version) {
-    output.write(`${c.dim}v${health.version}${health.sessionId ? ` · session ${health.sessionId.slice(0, 12)}…` : ""}${c.reset}\n`);
+    output.write(
+      `${c.dim}v${health.version}${health.sessionId ? ` · session ${c.plum}${health.sessionId.slice(0, 12)}…${c.reset}${c.dim}` : ""}${c.reset}\n`,
+    );
   }
   output.write("\n");
 }
@@ -83,13 +87,13 @@ async function main(): Promise<void> {
     onChunk: (text) => {
       if (!briefStreaming) {
         briefStreaming = true;
-        output.write(`\n${agentPrefix()}${c.bold}Morning brief${c.reset}\n`);
+        output.write(`\n${agentPrefix()}${c.gold}${c.bold}Morning brief${c.reset}\n`);
       }
-      output.write(text);
+      output.write(colorizeReplyChunk(text));
     },
     onBrief: (text) => {
       if (!briefStreaming) {
-        output.write(`\n${agentPrefix()}${c.bold}Morning brief${c.reset}\n${text.trim()}\n\n`);
+        output.write(`\n${agentPrefix()}${c.gold}${c.bold}Morning brief${c.reset}\n${colorizeReplyChunk(text.trim())}\n\n`);
       } else {
         output.write("\n\n");
       }
@@ -104,11 +108,11 @@ async function main(): Promise<void> {
     if (closed) {
       return;
     }
-    const where = event.target === "memory" ? "MEMORY.md" : "USER.md";
-    const label = event.staged ? "staged" : "learned";
-    const id = event.pendingId ? ` · ${event.pendingId}` : "";
+    const style = learnTargetStyle(event.target);
+    const label = event.staged ? `${c.warn}staged${c.reset}` : `${c.ok}learned${c.reset}`;
+    const id = event.pendingId ? ` ${c.dim}· ${event.pendingId}${c.reset}` : "";
     output.write(
-      `\n${c.dim}💾 ${label} → ${where}${id}: ${event.preview}${c.reset}\n`,
+      `\n${c.gold}💾${c.reset} ${label} ${c.dim}→${c.reset} ${style.color}${style.label}${c.reset}${id}: ${c.text}${event.preview}${c.reset}\n`,
     );
     if (!streaming) {
       prompt();
@@ -125,12 +129,12 @@ async function main(): Promise<void> {
     }
     const greeting = ready.greeting || health.greeting;
     if (greeting?.trim()) {
-      output.write(`${agentPrefix()}${greeting.trim()}\n\n`);
+      output.write(`${agentPrefix()}${colorizeReplyChunk(greeting.trim())}\n\n`);
     } else if (!health.warm) {
-      output.write(`${c.dim}Warming up…${c.reset}\n\n`);
+      output.write(`${c.gold}◌${c.reset} ${c.dim}Warming up…${c.reset}\n\n`);
     }
     if (ready.morningBrief === "pending") {
-      output.write(`${c.dim}Preparing morning brief…${c.reset}\n\n`);
+      output.write(`${c.dim}Preparing ${c.gold}morning brief${c.reset}${c.dim}…${c.reset}\n\n`);
     }
   } catch (err) {
     loader.stop();
@@ -227,8 +231,8 @@ async function main(): Promise<void> {
     }
     const text =
       matches.length === 1
-        ? `${matches[0].name} — ${matches[0].summary}`
-        : matches.map((cmd) => cmd.name).join("  ");
+        ? `${c.cmd}${matches[0].name}${c.reset} ${c.dim}— ${matches[0].summary}${c.reset}`
+        : matches.map((cmd) => `${c.cmd}${cmd.name}${c.reset}`).join("  ");
     output.write(`\x1b7\n\x1b[2K${c.dim}${text}${c.reset}\x1b8`);
     hintVisible = true;
   };
@@ -345,9 +349,14 @@ async function main(): Promise<void> {
               : h.memory
                 ? " memory=yes"
                 : "";
-          const learn = h.learn?.review ? " learn=on" : " learn=off";
+          const learn = h.learn?.review
+            ? ` ${c.teal}learn=on${c.reset}`
+            : ` ${c.dim}learn=off${c.reset}`;
+          const warm = h.warm
+            ? `${c.ok}yes${c.reset}`
+            : `${c.warn}no${c.reset}`;
           output.write(
-            `${c.ok}ok${c.reset} warm=${h.warm ? "yes" : "no"} persona=${h.persona ? "yes" : "no"}${mem}${learn} mcp=${h.mcp?.loaded ? h.mcp.servers.join(", ") : "off"}\n\n`,
+            `${c.ok}${c.bold}ok${c.reset} warm=${warm} persona=${h.persona ? c.ok + "yes" : c.dim + "no"}${c.reset}${mem}${learn} mcp=${h.mcp?.loaded ? c.teal + h.mcp.servers.join(", ") : c.dim + "off"}${c.reset}\n\n`,
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -359,6 +368,11 @@ async function main(): Promise<void> {
 
       if (isMemoryCommand(text)) {
         await handleMemoryCommand(text);
+        return;
+      }
+
+      if (isSkillsCommand(text)) {
+        await handleSkillsCommand();
         return;
       }
 
@@ -392,6 +406,10 @@ async function main(): Promise<void> {
 
       streaming = true;
       suspendInput();
+
+      if (!text.startsWith("/")) {
+        output.write(`\n${userPrefix(userName)}${text}\n`);
+      }
 
       const turn = new TurnActivity();
       activeTurn = turn;
@@ -454,8 +472,9 @@ async function main(): Promise<void> {
           output.write(`${c.dim}no pending learn entries${c.reset}\n\n`);
         } else {
           for (const entry of body.pending) {
+            const style = learnTargetStyle(entry.target);
             output.write(
-              `${c.dim}${entry.id}${c.reset} [${entry.target}] ${entry.content}\n`,
+              `${c.dim}${entry.id}${c.reset} ${style.color}[${entry.target}]${c.reset} ${c.text}${entry.content}${c.reset}\n`,
             );
           }
           output.write("\n");
@@ -511,9 +530,59 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (sub === "curate" || sub === "consolidate") {
+        const res = await fetch(`${apiBase()}/memory/curate`, {
+          method: "POST",
+          signal: AbortSignal.timeout(120_000),
+        });
+        const body = (await res.json()) as {
+          ok?: boolean;
+          error?: string;
+          memoryBefore?: number;
+          memoryAfter?: number;
+        };
+        if (!res.ok || body.error) {
+          throw new Error(body.error ?? `curate failed (${res.status})`);
+        }
+        output.write(
+          `${c.ok}curated${c.reset} memory ${body.memoryBefore ?? "?"}→${body.memoryAfter ?? "?"} chars\n\n`,
+        );
+        prompt();
+        return;
+      }
+
       output.write(
-        `${c.dim}usage: /memory pending · /memory approve [id|all] · /memory reject [id|all]${c.reset}\n\n`,
+        `${c.dim}usage: /memory pending · /memory approve [id|all] · /memory reject [id|all] · /memory curate${c.reset}\n\n`,
       );
+      prompt();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(`${c.err}${msg}${c.reset}\n\n`);
+      prompt();
+    }
+  }
+
+  async function handleSkillsCommand(): Promise<void> {
+    try {
+      const res = await fetch(`${apiBase()}/skills`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) {
+        throw new Error(`/skills returned ${res.status}`);
+      }
+      const body = (await res.json()) as {
+        skills?: { count: number; names: string[]; path: string };
+      };
+      const skills = body.skills;
+      if (!skills || skills.count === 0) {
+        output.write(`${c.dim}no skills installed (${skills?.path ?? "skills/"})${c.reset}\n\n`);
+      } else {
+        output.write(`${c.dim}${skills.path}${c.reset}\n`);
+        for (const name of skills.names) {
+          output.write(`  ${c.gold}${name}${c.reset}\n`);
+        }
+        output.write(`\n${c.dim}load with /skill <name> [prompt]${c.reset}\n\n`);
+      }
       prompt();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

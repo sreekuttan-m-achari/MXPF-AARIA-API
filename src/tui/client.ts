@@ -14,7 +14,7 @@ type Outbound =
   | { type: "error"; id?: string; error: string }
   | {
       type: "learned";
-      target: "memory" | "user";
+      target: "memory" | "user" | "skill";
       preview: string;
       staged?: boolean;
       pendingId?: string;
