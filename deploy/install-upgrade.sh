@@ -60,6 +60,27 @@ fail()  { printf '%s\n' "${RED}✗${RESET} $*" >&2; }
 step()  { printf '\n%s%s%s\n' "${BOLD}" "$*" "${RESET}"; }
 hr()    { printf '%s\n' "${DIM}────────────────────────────────────────────────${RESET}"; }
 
+# Portable lowercase (Bash 3.2 on macOS lacks ${var,,}).
+to_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# GNU sed: sed -i; BSD/macOS sed: sed -i ''.
+sed_inplace() {
+  local expr="$1" file="$2"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    sed -i '' "$expr" "$file"
+  else
+    sed -i "$expr" "$file"
+  fi
+}
+
+# OS family for service / port probes.
+OS_FAMILY=linux
+case "$(uname -s)" in
+  Darwin*) OS_FAMILY=macos ;;
+  Linux*)  OS_FAMILY=linux ;;
+  *)       OS_FAMILY=other ;;
+esac
+
 prompt_yn() {
   local question="$1"
   local default="${2:-y}"
@@ -69,7 +90,7 @@ prompt_yn() {
     printf '%s [%s] ' "$question" "$hint" >/dev/tty
     read -r reply </dev/tty || reply=""
     reply="${reply:-$default}"
-    case "${reply,,}" in
+    case "$(to_lower "$reply")" in
       y|yes) return 0 ;;
       n|no)  return 1 ;;
       *) warn "Please answer y or n." ;;
@@ -167,6 +188,13 @@ check_node_version() {
 }
 
 check_user_systemd() {
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    warn "macOS detected — systemd user services are Linux-only"
+    warn "  After install, run the API with: npm start"
+    warn "  (launchd plist install is not provided yet)"
+    PREREQ_WARNINGS=$((PREREQ_WARNINGS + 1))
+    return 1
+  fi
   if systemctl --user show-environment >/dev/null 2>&1; then
     ok "systemd user session available"
     return 0
@@ -187,7 +215,9 @@ check_port_8788() {
       return 1
     fi
   elif command -v lsof >/dev/null 2>&1; then
-    if lsof -i :8788 -sTCP:LISTEN >/dev/null 2>&1; then
+    # macOS/BSD-friendly probe (no -sTCP:LISTEN required)
+    if lsof -nP -iTCP:8788 -sTCP:LISTEN >/dev/null 2>&1 || \
+       lsof -nP -iTCP:8788 2>/dev/null | grep -qi LISTEN; then
       warn "Port 8788 is already in use"
       PREREQ_WARNINGS=$((PREREQ_WARNINGS + 1))
       return 1
@@ -298,7 +328,7 @@ env_get_or() {
 env_set() {
   local key="$1" value="$2" file="${3:-$ROOT/.env}"
   if grep -qE "^${key}=" "$file" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    sed_inplace "s|^${key}=.*|${key}=${value}|" "$file"
   else
     printf '\n%s=%s\n' "$key" "$value" >> "$file"
   fi
@@ -392,8 +422,8 @@ configure_user_profile() {
   timezone="$(prompt_value "Your timezone (USER.md **Timezone:**)" "Asia/Kolkata")"
 
   if [[ -f "$ROOT/USER.md" ]]; then
-    sed -i "s|^\*\*Call me:\*\*.*|**Call me:** ${call_name}|" "$ROOT/USER.md"
-    sed -i "s|^\*\*Timezone:\*\*.*|**Timezone:** ${timezone}|" "$ROOT/USER.md"
+    sed_inplace "s|^\*\*Call me:\*\*.*|**Call me:** ${call_name}|" "$ROOT/USER.md"
+    sed_inplace "s|^\*\*Timezone:\*\*.*|**Timezone:** ${timezone}|" "$ROOT/USER.md"
   else
     cat > "$ROOT/USER.md" <<EOF
 **Call me:** ${call_name}
@@ -498,7 +528,7 @@ ensure_path_in_shell() {
 
   if grep -qE '^# export PATH=.*\.local/bin' "$shell_rc" 2>/dev/null; then
     if prompt_yn "Uncomment ~/.local/bin PATH line in $shell_rc?" "y"; then
-      sed -i 's|^# export PATH=\$HOME/bin:\$HOME/.local/bin|export PATH=$HOME/bin:$HOME/.local/bin|' "$shell_rc"
+      sed_inplace 's|^# export PATH=\$HOME/bin:\$HOME/.local/bin|export PATH=$HOME/bin:$HOME/.local/bin|' "$shell_rc"
       ok "Updated $shell_rc"
     fi
   elif ! grep -qE '\.local/bin' "$shell_rc" 2>/dev/null; then
@@ -616,8 +646,15 @@ cleanup_for_reinstall() {
 # ── systemd service ───────────────────────────────────────────────────────────
 
 install_systemd_service() {
-  step "Step 7 · systemd user service (aria-api)"
+  step "Step 7 · background service (aria-api)"
   hr
+
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    warn "Skipping systemd install on macOS (no systemd / launchd template yet)"
+    info "Start the API in another terminal: npm start"
+    info "Then run: aaria"
+    return 0
+  fi
 
   # Reinstall: refresh unit if it already exists; otherwise ask once.
   if [[ "$MODE" == "reinstall" ]]; then
@@ -808,20 +845,42 @@ print_summary() {
   hr
   local api_url
   api_url="$(env_get_or AARIA_API_URL http://127.0.0.1:8788)"
+  local service_lines=""
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    service_lines=$(cat <<EOF
+  ${BOLD}API${RESET}          npm start
+  ${BOLD}Health${RESET}       curl -s ${api_url}/health | python3 -m json.tool
+EOF
+)
+  else
+    service_lines=$(cat <<EOF
+  ${BOLD}Health${RESET}       curl -s ${api_url}/health | python3 -m json.tool
+  ${BOLD}Service${RESET}      systemctl --user status aria-api.service
+  ${BOLD}Logs${RESET}         journalctl --user -u aria-api.service -f
+EOF
+)
+  fi
   cat <<EOF
 ${GREEN}ARIA ${MODE} complete.${RESET}
 
   ${BOLD}Terminal${RESET}     aaria
-  ${BOLD}Health${RESET}       curl -s ${api_url}/health | python3 -m json.tool
-  ${BOLD}Service${RESET}      systemctl --user status aria-api.service
-  ${BOLD}Logs${RESET}         journalctl --user -u aria-api.service -f
+${service_lines}
 
 ${DIM}Edit persona:${RESET}  SOUL.md · USER.md · MEMORY.md
 ${DIM}Re-run anytime:${RESET} bash deploy/install-upgrade.sh
 ${DIM}Reinstall:${RESET}     bash deploy/install-upgrade.sh --reinstall
 
+EOF
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    cat <<EOF
+${YELLOW}macOS tip:${RESET} systemd is Linux-only — keep the API up with ${BOLD}npm start${RESET} (or add your own launchd plist).
+${YELLOW}PATH tip:${RESET} ensure ~/.local/bin is on PATH (zsh: ~/.zshrc).
+EOF
+  else
+    cat <<EOF
 ${YELLOW}SSH tip:${RESET} ensure ~/.local/bin is on PATH and use ${BOLD}systemctl --user${RESET} without sudo.
 EOF
+  fi
 }
 
 choose_mode_interactively() {

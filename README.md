@@ -115,17 +115,20 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 Clone/enter the project, then choose **host** or **Docker**.
 
 **Quick path (recommended):** run the guided installer — prerequisites, `.env`, persona
-files, CLI, background service, and health checks in one flow:
+files, CLI, background service (Linux/Windows), and health checks in one flow:
 
 ```bash
-# Linux / macOS
+# Linux / macOS (same script)
 bash deploy/install-upgrade.sh
+# keep local .env / SOUL / USER / MEMORY and redeploy deps:
+bash deploy/install-upgrade.sh --reinstall
 ```
 
 ```powershell
 # Windows (PowerShell 5.1+)
 powershell -NoProfile -ExecutionPolicy Bypass -File deploy\install-upgrade.ps1
 # or: npm run install:win
+# reinstall: npm run install:reinstall:win
 ```
 
 ### 1. Configure (manual alternative)
@@ -140,7 +143,7 @@ cp MEMORY.sample.md MEMORY.md  # optional: seed agent memory (learn loop appends
 cp .cursor/mcp.json.sample .cursor/mcp.json   # optional: enable MCP tools (incl. memory)
 ```
 
-### 2a. Run on the host (systemd user service)
+### 2a. Run on Linux (systemd user service)
 
 ```bash
 nvm install && nvm use          # Node 22 (from .nvmrc)
@@ -161,6 +164,51 @@ Install the `aaria` terminal command:
 npm run install-cli             # symlinks aaria → ~/.local/bin/aaria
 aaria                           # opens the TUI (auto-starts the service if down)
 ```
+
+### 2a-mac. Run on macOS (host)
+
+Same guided installer as Linux. **There is no systemd on macOS** — run the API in the
+foreground (or your own launchd/plist); the installer skips the service step automatically.
+
+Requires **Node.js ≥ 22.13** (nvm recommended), and `~/.local/bin` on PATH (zsh):
+
+```bash
+# Guided install (recommended)
+bash deploy/install-upgrade.sh
+# or: npm run install
+
+# Or step by step:
+nvm install && nvm use
+npm install
+cp .env-sample .env             # set CURSOR_API_KEY
+cp SOUL.sample.md SOUL.md
+cp USER.sample.md USER.md
+cp MEMORY.sample.md MEMORY.md
+npm run install-cli             # aaria → ~/.local/bin
+
+# PATH for zsh (default shell on modern macOS)
+grep -q '.local/bin' ~/.zshrc 2>/dev/null || \
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+# Terminal 1 — API
+npm start                       # → http://127.0.0.1:8788
+
+# Terminal 2 — TUI
+aaria
+
+curl -s http://127.0.0.1:8788/health | python3 -m json.tool
+```
+
+Reinstall without touching local config:
+
+```bash
+bash deploy/install-upgrade.sh --reinstall
+```
+
+> **Note:** `install-service.sh` / `install-heartbeat-timer.sh` are Linux/systemd only.
+> On macOS use `npm start` and the in-process job scheduler (or a cron `curl` to `/jobs/run`).
+> See `deploy/README.md` for the full platform matrix.
 
 ### 2a-win. Run on Windows (host)
 
@@ -184,19 +232,19 @@ npm start                      # foreground API on http://127.0.0.1:8788
 aaria                          # TUI (new terminal after PATH update)
 ```
 
-| Linux | Windows |
-|-------|---------|
-| `bash deploy/install-upgrade.sh` | `npm run install:win` |
-| `bash deploy/install-service.sh` | `npm run install-service:win` |
-| `bash deploy/install-heartbeat-timer.sh` | `npm run install-heartbeat:win` |
-| `npm run install-cli` | `npm run install-cli:win` |
-| `systemctl --user start aria-api.service` | `Start-ScheduledTask -TaskName ARIA-API` |
-| `systemctl --user status aria-heartbeat.timer` | `Get-ScheduledTask -TaskName ARIA-Heartbeat` |
-| `journalctl --user -u aria-api.service -f` | Task Scheduler → **ARIA-API** history |
-| `~/.local/bin` on PATH | `%USERPROFILE%\.local\bin` on user PATH |
+| Linux | macOS | Windows |
+|-------|-------|---------|
+| `bash deploy/install-upgrade.sh` | same | `npm run install:win` |
+| `bash deploy/install-upgrade.sh --reinstall` | same | `npm run install:reinstall:win` |
+| `bash deploy/install-service.sh` | `npm start` | `npm run install-service:win` |
+| `bash deploy/install-heartbeat-timer.sh` | in-process / cron | `npm run install-heartbeat:win` |
+| `npm run install-cli` | same | `npm run install-cli:win` |
+| `systemctl --user start aria-api.service` | `npm start` | `Start-ScheduledTask -TaskName ARIA-API` |
+| `journalctl --user -u aria-api.service -f` | terminal running `npm start` | Task Scheduler → **ARIA-API** |
+| `~/.local/bin` on PATH | `~/.local/bin` in `~/.zshrc` | `%USERPROFILE%\.local\bin` on user PATH |
 
-> **Note:** The TUI's auto-start of `aria-api.service` is Linux/systemd only. On Windows,
-> use the scheduled task from `install-service.ps1` or run `npm start` before `aaria`.
+> **Note:** The TUI's auto-start of `aria-api.service` is Linux/systemd only. On macOS and
+> Windows, start the API first (`npm start` or the Windows scheduled task) before `aaria`.
 
 ### 2b. Run with Docker
 
@@ -381,7 +429,7 @@ MXPF-AARIA-API/
 ├── bin/aaria                 # TUI launcher (bash; Linux/macOS)
 ├── bin/aaria.cmd             # TUI launcher (Windows)
 ├── deploy/
-│   ├── README.md               # Linux ↔ Windows deploy parity table
+│   ├── README.md               # Linux / macOS / Windows deploy matrix
 │   ├── aria-api.service.in     # systemd user-unit template (Linux)
 │   ├── aria-api.launch.cmd.in  # API launch template (Windows)
 │   ├── aria-heartbeat.*.in     # optional external heartbeat (Linux)

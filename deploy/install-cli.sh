@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Install `aaria` terminal client to ~/.local/bin
+# Works on Linux and macOS (no GNU-only flags).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,8 +19,9 @@ fi
 
 mkdir -p "$BIN_DIR"
 
-# If the link already resolves to the correct source, skip re-linking.
-if [[ -L "$LINK" ]] && [[ "$(readlink -f "$LINK" 2>/dev/null)" == "$(readlink -f "$SOURCE")" ]]; then
+# Compare symlink target string (SOURCE is absolute). Avoids GNU readlink -f
+# which is missing on macOS.
+if [[ -L "$LINK" ]] && [[ "$(readlink "$LINK")" == "$SOURCE" ]]; then
   echo "Already linked: $LINK → $SOURCE"
 else
   # Remove stale/wrong link first (may be owned by root — try, then warn).

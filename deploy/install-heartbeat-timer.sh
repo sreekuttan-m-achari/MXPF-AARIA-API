@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# Optional: install aria-heartbeat.timer — external curl watchdog (in addition to in-process scheduler).
+# Optional: install aria-heartbeat.timer — external curl watchdog (Linux/systemd only).
 set -euo pipefail
 
 SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+case "$(uname -s)" in
+  Darwin*)
+    echo "install-heartbeat-timer.sh requires systemd (Linux only)." >&2
+    echo "On macOS the in-process scheduler in the API is enough; or cron a curl to /jobs/run." >&2
+    exit 1
+    ;;
+esac
+
 USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SERVICE_TEMPLATE="${SERVER_DIR}/deploy/aria-heartbeat.service.in"
 TIMER_TEMPLATE="${SERVER_DIR}/deploy/aria-heartbeat.timer.in"

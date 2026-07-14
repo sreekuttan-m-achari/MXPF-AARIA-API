@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# Install aria-api server as a systemd user service.
+# Install aria-api server as a systemd user service (Linux only).
 set -euo pipefail
 
 SERVER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+case "$(uname -s)" in
+  Darwin*)
+    echo "install-service.sh targets systemd, which is not available on macOS." >&2
+    echo "Start the API with: cd $SERVER_DIR && npm start" >&2
+    echo "Then run: aaria" >&2
+    exit 1
+    ;;
+esac
+
 USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SERVICE_NAME="aria-api.service"
 TEMPLATE="${SERVER_DIR}/deploy/aria-api.service.in"
