@@ -7,6 +7,7 @@ export type SlashCommand = {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/help", summary: "Show this help" },
   { name: "/health", summary: "Backend status" },
+  { name: "/ops", summary: "Ops overlay (panels · metrics) — also Ctrl+O" },
   { name: "/memory", summary: "Memory learn loop (pending · approve · reject · curate)" },
   { name: "/skills", summary: "List installed skills" },
   { name: "/skill", summary: "Load a skill for the next turn (/skill <name> [prompt])" },
@@ -25,11 +26,18 @@ export function matchCommands(token: string): SlashCommand[] {
   if (t === "/") {
     return SLASH_COMMANDS;
   }
-  return SLASH_COMMANDS.filter(
+  const prefixMatches = SLASH_COMMANDS.filter(
     (cmd) =>
       cmd.name.startsWith(t) ||
       (cmd.aliases ?? []).some((alias) => alias.startsWith(t)),
   );
+  // `/skill` is a prefix of `/skills` — when the token is an exact command name,
+  // show only that command (not the longer sibling).
+  const exact = prefixMatches.filter((cmd) => cmd.name === t);
+  if (exact.length > 0) {
+    return exact;
+  }
+  return prefixMatches;
 }
 
 /** readline completer: completes slash commands, passes everything else through. */
@@ -37,8 +45,13 @@ export function completeLine(line: string): [string[], string] {
   if (!line.startsWith("/")) {
     return [[], line];
   }
+  const lower = line.toLowerCase();
   const names = allCommandNames();
-  const hits = names.filter((name) => name.startsWith(line.toLowerCase()));
+  const exact = names.filter((name) => name === lower);
+  if (exact.length > 0) {
+    return [exact, line];
+  }
+  const hits = names.filter((name) => name.startsWith(lower));
   return [hits.length > 0 ? hits : names, line];
 }
 
@@ -56,6 +69,11 @@ export function isSkillsCommand(text: string): boolean {
   return text.toLowerCase() === "/skills";
 }
 
+/** Bare `/skill` with no name — show usage (not sent to the agent). */
+export function isBareSkillCommand(text: string): boolean {
+  return text.trim().toLowerCase() === "/skill";
+}
+
 export function isSkillCommand(text: string): boolean {
   return /^\/skill\s+\S+/i.test(text.trim());
 }
@@ -63,6 +81,7 @@ export function isSkillCommand(text: string): boolean {
 const EXACT_COMMANDS = new Set([
   "/help",
   "/health",
+  "/ops",
   "/cancel",
   "/quit",
   "/exit",
@@ -82,6 +101,9 @@ export function isBuiltinCommand(text: string): boolean {
     return true;
   }
   if (isSkillsCommand(trimmed)) {
+    return true;
+  }
+  if (isBareSkillCommand(trimmed)) {
     return true;
   }
   return looksLikeCommand(trimmed);

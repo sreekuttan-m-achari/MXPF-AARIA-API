@@ -1,3 +1,4 @@
+import { readSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import type { Readable, Writable } from "node:stream";
 
@@ -6,15 +7,48 @@ const PASTE_END = "\x1b[201~";
 
 export type PasteInputOptions = {
   onPaste: (text: string) => void;
+  /** Fired when Ctrl+C (\u0003) is seen; the byte is never forwarded to readline. */
+  onInterrupt?: () => void;
 };
 
 type TtyReadable = Readable & {
   isTTY?: boolean;
   isRaw?: boolean;
+  fd?: number;
   setRawMode?: (mode: boolean) => TtyReadable;
   columns?: number;
   rows?: number;
 };
+
+/** Discard any bytes waiting in the TTY buffer (e.g. after Ink unmount). */
+export function flushStdin(stream: TtyReadable): void {
+  if (!stream.isTTY || typeof stream.setRawMode !== "function" || stream.fd === undefined) {
+    return;
+  }
+  const wasRaw = stream.isRaw ?? false;
+  try {
+    if (!wasRaw) {
+      stream.setRawMode(true);
+    }
+    // Set non-blocking drain: readSync throws EAGAIN when empty on most TTYs.
+    const buf = Buffer.alloc(4096);
+    for (;;) {
+      try {
+        const n = readSync(stream.fd, buf, 0, buf.length, null);
+        if (n <= 0) {
+          break;
+        }
+      } catch {
+        break;
+      }
+    }
+  } catch {
+    // ignore — best-effort drain
+  } finally {
+    // Always restore caller's expectation; readline wants raw=true after ops.
+    stream.setRawMode(wasRaw);
+  }
+}
 
 /** readline needs isTTY + setRawMode on its input stream for Tab completion. */
 function forwardTty(input: TtyReadable, filtered: PassThrough): TtyReadable {
@@ -47,6 +81,11 @@ function forwardTty(input: TtyReadable, filtered: PassThrough): TtyReadable {
   return out;
 }
 
+export type PasteAwareInput = TtyReadable & {
+  /** When true, stdin bytes are dropped (Ink/ops owns the TTY). */
+  setMuted: (muted: boolean) => void;
+};
+
 /**
  * Wraps a TTY stdin stream so bracketed-paste blobs are delivered whole instead
  * of being split across readline "line" events. Enables bracketed paste mode on
@@ -56,11 +95,21 @@ export function createPasteAwareInput(
   input: TtyReadable,
   output: Writable & { isTTY?: boolean },
   options: PasteInputOptions,
-): TtyReadable {
+): PasteAwareInput {
   const pass = new PassThrough();
-  const filtered = forwardTty(input, pass);
+  const filtered = forwardTty(input, pass) as PasteAwareInput;
   let inPaste = false;
   let pasteBuf = "";
+  let muted = false;
+
+  filtered.setMuted = (next: boolean) => {
+    muted = next;
+    if (next) {
+      // Drop any half-parsed paste so it cannot leak after unmute.
+      inPaste = false;
+      pasteBuf = "";
+    }
+  };
 
   if (output.isTTY) {
     output.write("\x1b[?2004h");
@@ -77,6 +126,21 @@ export function createPasteAwareInput(
 
   input.on("data", (chunk: Buffer | string) => {
     let rest = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+
+    // Ops / Ink is listening on the same stdin — do not also feed readline.
+    if (muted) {
+      return;
+    }
+
+    // Never forward Ctrl+C into the readline buffer — while input is paused it
+    // would sit there and fire SIGINT (quit) as soon as the turn resumes.
+    if (rest.includes("\u0003") && options.onInterrupt) {
+      options.onInterrupt();
+      rest = rest.replace(/\u0003/g, "");
+      if (rest.length === 0) {
+        return;
+      }
+    }
 
     while (rest.length > 0) {
       if (!inPaste) {

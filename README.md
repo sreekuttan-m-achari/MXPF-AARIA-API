@@ -290,6 +290,7 @@ All settings are environment variables (see `.env-sample`). Common ones:
 | `AARIA_WS_HOST` | `127.0.0.1` (`0.0.0.0` in Docker) | Bind address |
 | `AARIA_WS_PORT` | `8788` | HTTP/WS port |
 | `AARIA_API_URL` | `http://127.0.0.1:8788` | Base URL the TUI/health client dials |
+| `AARIA_OPS` | on | Set `0` to disable ops overlay (`/ops`, Ctrl+O) |
 | `AARIA_AGENT_CWD` | server cwd | Working directory for the agent |
 | `AGENT_SOUL_PATH` | `./SOUL.md` | Persona file |
 | `AGENT_USER_PATH` | `./USER.md` | User profile file |
@@ -414,6 +415,7 @@ Built-in commands (type `/` for live suggestions, `Tab` to complete):
 |---------|-------------|
 | `/help` | Show help |
 | `/health` | Backend status |
+| `/ops` | Ops overlay (Health / Jobs / Memory / Chat) — also **Ctrl+O**; set `AARIA_OPS=0` to disable |
 | `/cancel` | Cancel the current reply |
 | `/quit` (`/exit`, `Ctrl+D`) | Exit |
 

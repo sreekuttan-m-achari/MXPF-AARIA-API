@@ -8,6 +8,7 @@ import {
   completeLine,
   isBuiltinCommand,
   isMemoryCommand,
+  isBareSkillCommand,
   isSkillsCommand,
   looksLikeCommand,
   matchCommands,
@@ -16,7 +17,8 @@ import {
 import { TurnActivity } from "./activity.js";
 import { apiBase } from "./config.js";
 import { BootLoader } from "./loader.js";
-import { createPasteAwareInput } from "./paste-input.js";
+import { createPasteAwareInput, flushStdin } from "./paste-input.js";
+import { opsEnabled, pushChatHistory, runOpsMode } from "./ops/index.js";
 import { agentPrefix, ariaWordmark, c, formalTitleLine, learnTargetStyle, userPrefix } from "./theme.js";
 import { colorizeCommandLine, colorizeReplyChunk } from "./render.js";
 
@@ -35,6 +37,7 @@ ${commandHelpLines()}
 
 ${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for command suggestions · Tab to complete.
 Paste multiple lines as one message · end a line with \\ to continue on the next.
+${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable).
 Talk naturally for work tasks — code, DevOps, servers, planning.
 ${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 
@@ -146,6 +149,8 @@ async function main(): Promise<void> {
   const interactive = Boolean(input.isTTY && output.isTTY);
 
   let dispatchInput: ((text: string) => void) | undefined;
+  /** Assigned after helpers are defined; paste/SIGINT paths call through this. */
+  let handleInterrupt = (): void => {};
 
   const readlineInput = interactive
     ? createPasteAwareInput(input, output, {
@@ -167,6 +172,9 @@ async function main(): Promise<void> {
           rl.write("");
           prompt();
         },
+        onInterrupt: () => {
+          handleInterrupt();
+        },
       })
     : input;
 
@@ -184,6 +192,7 @@ async function main(): Promise<void> {
   let continuation = "";
 
   let hintVisible = false;
+  let opsOpen = false;
 
   // While the agent is working, pause readline so keystrokes are not echoed and
   // stray Enters do not redraw the prompt mid-reply. Ctrl+C still routes via SIGINT.
@@ -205,6 +214,97 @@ async function main(): Promise<void> {
     rl.resume();
   };
 
+  /** Put stdin back how readline expects it after Ink stole the TTY. */
+  const restoreReadlineTty = (): void => {
+    if (!interactive) {
+      return;
+    }
+    // Cooked mode after Ink = OS echo + readline echo (double) and no Tab completer.
+    if (typeof input.setRawMode === "function") {
+      input.setRawMode(true);
+    }
+    if (output.isTTY) {
+      output.write("\x1b[?25h");
+    }
+  };
+
+  /** Drop partial prompt text and any leaked keystrokes after ops / Ink handoff. */
+  const resetPromptInput = (): void => {
+    rl.line = "";
+    rl.cursor = 0;
+    if (output.isTTY) {
+      output.write("\r\x1b[2K");
+    }
+  };
+
+  const openOps = async (): Promise<void> => {
+    if (!opsEnabled()) {
+      output.write(`${c.dim}ops disabled (AARIA_OPS=0)${c.reset}\n\n`);
+      prompt();
+      return;
+    }
+    if (!interactive || opsOpen || closed) {
+      return;
+    }
+    if (streaming) {
+      output.write(`${c.warn}wait for the current reply (or /cancel) before opening ops${c.reset}\n\n`);
+      prompt();
+      return;
+    }
+    opsOpen = true;
+    clearHint();
+    resetPromptInput();
+    suspendInput();
+    // Same stdin feeds both Ink and the paste→readline bridge; mute the bridge
+    // so ops keys (especially q) never land in the light-mode prompt.
+    if (interactive && "setMuted" in readlineInput) {
+      (readlineInput as { setMuted: (m: boolean) => void }).setMuted(true);
+    }
+    try {
+      await runOpsMode();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(`${c.err}ops exited: ${msg}${c.reset}\n`);
+    } finally {
+      flushStdin(input);
+      resetPromptInput();
+      if (interactive && "setMuted" in readlineInput) {
+        (readlineInput as { setMuted: (m: boolean) => void }).setMuted(false);
+      }
+      opsOpen = false;
+      restoreReadlineTty();
+      resumeInput();
+      output.write(`\n ${ariaWordmark()} ${c.dim}back to light TUI${c.reset}\n\n`);
+      prompt();
+    }
+  };
+
+  const prompt = (): void => {
+    if (!closed) {
+      rl.prompt();
+    }
+  };
+
+  const finishTurn = (): void => {
+    activeTurn?.end();
+    activeTurn = undefined;
+    streaming = false;
+    currentChatId = undefined;
+    resumeInput();
+    output.write("\n\n");
+    prompt();
+  };
+
+  const quit = (): void => {
+    if (closed) {
+      return;
+    }
+    output.write(`\n${c.dim}bye${c.reset}\n`);
+    closed = true;
+    client.close();
+    rl.close();
+  };
+
   // Render a dim suggestion line just below the prompt while typing a command.
   // Uses DEC save/restore cursor so the input line is never disturbed.
   const clearHint = (): void => {
@@ -213,6 +313,24 @@ async function main(): Promise<void> {
     }
     output.write("\x1b7\n\x1b[2K\x1b8");
     hintVisible = false;
+  };
+
+  /**
+   * Cancel in-flight chat, or exit. Must work even while readline is paused
+   * during a turn — otherwise Ctrl+C becomes a bare process SIGINT and kills
+   * the TUI instead of cancelling.
+   */
+  handleInterrupt = (): void => {
+    if (closed || opsOpen) {
+      return;
+    }
+    clearHint();
+    if (streaming && currentChatId) {
+      output.write(`\n${c.dim}cancelling…${c.reset}\n`);
+      client.cancel(currentChatId);
+      return;
+    }
+    quit();
   };
 
   const renderHint = (): void => {
@@ -240,6 +358,20 @@ async function main(): Promise<void> {
   if (interactive) {
     // readline listens on readlineInput (not raw stdin); hints must attach there too.
     readlineInput.prependListener("keypress", (_str, key) => {
+      if (opsOpen) {
+        return;
+      }
+      // Even if readline is paused, keypress can still fire on some TTYs.
+      if (streaming) {
+        if (key?.ctrl && key.name === "c") {
+          handleInterrupt();
+        }
+        return;
+      }
+      if (key?.ctrl && key.name === "o") {
+        void openOps();
+        return;
+      }
       if (draftMessage && key?.name === "escape") {
         draftMessage = null;
         continuation = "";
@@ -256,35 +388,16 @@ async function main(): Promise<void> {
     });
   }
 
-  const prompt = (): void => {
-    if (!closed) {
-      rl.prompt();
-    }
-  };
-
-  const finishTurn = (): void => {
-    activeTurn?.end();
-    activeTurn = undefined;
-    streaming = false;
-    currentChatId = undefined;
-    resumeInput();
-    output.write("\n\n");
-    prompt();
-  };
-
   rl.setPrompt(userPrefix(userName));
 
   rl.on("SIGINT", () => {
-    clearHint();
-    if (streaming && currentChatId) {
-      output.write(`\n${c.dim}cancelling…${c.reset}\n`);
-      client.cancel(currentChatId);
-      return;
-    }
-    output.write(`\n${c.dim}bye${c.reset}\n`);
-    closed = true;
-    client.close();
-    rl.close();
+    handleInterrupt();
+  });
+
+  // While input is suspended (streaming / ops handoff), readline may not emit
+  // SIGINT — the terminal delivers a real signal instead. Own it so we cancel.
+  process.on("SIGINT", () => {
+    handleInterrupt();
   });
 
   rl.on("line", (line) => {
@@ -370,6 +483,11 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (lower === "/ops") {
+        await openOps();
+        return;
+      }
+
       if (isMemoryCommand(text)) {
         await handleMemoryCommand(text);
         return;
@@ -377,6 +495,11 @@ async function main(): Promise<void> {
 
       if (isSkillsCommand(text)) {
         await handleSkillsCommand();
+        return;
+      }
+
+      if (isBareSkillCommand(text)) {
+        await handleSkillHelpCommand();
         return;
       }
 
@@ -415,6 +538,7 @@ async function main(): Promise<void> {
       if (!text.startsWith("/") && !options?.alreadyDisplayed) {
         output.write(`\n${userPrefix(userName)}${text}\n`);
       }
+      pushChatHistory("user", text);
 
       const turn = new TurnActivity();
       activeTurn = turn;
@@ -425,15 +549,18 @@ async function main(): Promise<void> {
           onChunk: (chunk) => {
             turn.onChunk(chunk);
           },
-          onDone: () => {
+          onDone: (reply) => {
             if (!turn.hasContent) {
               output.write(`${agentPrefix()}${c.dim}(no reply)${c.reset}`);
+            } else if (reply?.trim()) {
+              pushChatHistory("assistant", reply);
             }
             finishTurn();
           },
           onCancelled: (partial) => {
             if (partial) {
               output.write(`\n${c.dim}(cancelled)${c.reset}`);
+              pushChatHistory("assistant", partial);
             } else {
               output.write(`\n${c.dim}cancelled${c.reset}`);
             }
@@ -559,6 +686,39 @@ async function main(): Promise<void> {
       output.write(
         `${c.dim}usage: /memory pending · /memory approve [id|all] · /memory reject [id|all] · /memory curate${c.reset}\n\n`,
       );
+      prompt();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(`${c.err}${msg}${c.reset}\n\n`);
+      prompt();
+    }
+  }
+
+  async function handleSkillHelpCommand(): Promise<void> {
+    output.write(
+      `${c.dim}usage:${c.reset} ${c.cmd}/skill <name> [prompt]${c.reset}\n` +
+        `${c.dim}       ${c.cmd}/skills${c.reset}${c.dim} — list installed skills${c.reset}\n`,
+    );
+    try {
+      const res = await fetch(`${apiBase()}/skills`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) {
+        throw new Error(`/skills returned ${res.status}`);
+      }
+      const body = (await res.json()) as {
+        skills?: { count: number; names: string[]; path: string };
+      };
+      const skills = body.skills;
+      if (!skills || skills.count === 0) {
+        output.write(`${c.dim}no skills installed (${skills?.path ?? "skills/"})${c.reset}\n\n`);
+      } else {
+        output.write(`${c.dim}${skills.path}${c.reset}\n`);
+        for (const name of skills.names) {
+          output.write(`  ${c.gold}${name}${c.reset}\n`);
+        }
+        output.write("\n");
+      }
       prompt();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
