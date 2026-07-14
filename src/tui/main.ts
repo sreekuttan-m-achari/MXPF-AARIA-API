@@ -230,8 +230,10 @@ async function main(): Promise<void> {
 
   /** Drop partial prompt text and any leaked keystrokes after ops / Ink handoff. */
   const resetPromptInput = (): void => {
-    rl.line = "";
-    rl.cursor = 0;
+    // Interface.line/cursor are typed read-only; they are writable at runtime.
+    const iface = rl as readline.Interface & { line: string; cursor: number };
+    iface.line = "";
+    iface.cursor = 0;
     if (output.isTTY) {
       output.write("\r\x1b[2K");
     }
