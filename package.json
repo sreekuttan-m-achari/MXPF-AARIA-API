@@ -20,7 +20,9 @@
     "install-heartbeat": "bash deploy/install-heartbeat-timer.sh",
     "install-heartbeat:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-heartbeat-timer.ps1",
     "install": "bash deploy/install-upgrade.sh",
-    "install:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-upgrade.ps1"
+    "install:reinstall": "bash deploy/install-upgrade.sh --reinstall",
+    "install:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-upgrade.ps1",
+    "install:reinstall:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-upgrade.ps1 -Reinstall"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.22",

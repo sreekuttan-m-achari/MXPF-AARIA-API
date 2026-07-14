@@ -1,9 +1,43 @@
 #!/usr/bin/env bash
-# Guided interactive install / upgrade for AARIA (API + aaria TUI).
+# Guided interactive install / upgrade / reinstall for AARIA (API + aaria TUI).
+#
+# Usage:
+#   bash deploy/install-upgrade.sh              # install or upgrade (prompts)
+#   bash deploy/install-upgrade.sh --reinstall  # wipe deps & redeploy; keep local config
+#   bash deploy/install-upgrade.sh --help
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+# ── Args ──────────────────────────────────────────────────────────────────────
+
+FORCE_REINSTALL=0
+for arg in "$@"; do
+  case "$arg" in
+    --reinstall|-r) FORCE_REINSTALL=1 ;;
+    --help|-h)
+      cat <<'EOF'
+AARIA guided install / upgrade / reinstall
+
+  bash deploy/install-upgrade.sh              Detect install vs upgrade
+  bash deploy/install-upgrade.sh --reinstall  Clean redeploy (keeps local config)
+  bash deploy/install-upgrade.sh -r           Same as --reinstall
+
+Reinstall (Option A) removes node_modules (+ dist) and reinstalls deps, CLI,
+and the systemd service if already present. It never modifies:
+
+  .env  SOUL.md  USER.md  MEMORY.md  .cursor/mcp.json
+  .aria-conversations.ndjson  .aria-learn-pending.json
+EOF
+      exit 0
+      ;;
+    *)
+      printf 'Unknown option: %s (try --help)\n' "$arg" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 
@@ -71,15 +105,31 @@ pause() {
   read -r _ </dev/tty || true
 }
 
+# Local config that reinstall must never touch.
+PRESERVE_FILES=(
+  .env
+  SOUL.md
+  USER.md
+  MEMORY.md
+  .cursor/mcp.json
+  .aria-conversations.ndjson
+  .aria-learn-pending.json
+)
+PRESERVE_CHECKSUMS=()
+
 # ── Detection ─────────────────────────────────────────────────────────────────
 
 MODE="install"
 if [[ -f "$ROOT/.env" ]] || [[ -d "$ROOT/node_modules" ]] || [[ -L "$HOME/.local/bin/aaria" ]]; then
   MODE="upgrade"
 fi
+if [[ "$FORCE_REINSTALL" -eq 1 ]]; then
+  MODE="reinstall"
+fi
 
 PREREQ_ISSUES=0
 PREREQ_WARNINGS=0
+SELF_CHECK_FAILURES=0
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
@@ -480,21 +530,112 @@ install_cli() {
   fi
 }
 
+# ── Reinstall cleanup ─────────────────────────────────────────────────────────
+
+file_checksum() {
+  local path="$1"
+  if [[ ! -e "$path" ]]; then
+    printf 'MISSING'
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    # Fallback: size + mtime
+    wc -c <"$path" | tr -d ' '; printf '+';
+    stat -c '%Y' "$path" 2>/dev/null || stat -f '%m' "$path" 2>/dev/null || echo 0
+  fi
+}
+
+snapshot_preserved_files() {
+  PRESERVE_CHECKSUMS=()
+  local rel
+  for rel in "${PRESERVE_FILES[@]}"; do
+    PRESERVE_CHECKSUMS+=("$(file_checksum "$ROOT/$rel")")
+  done
+}
+
+verify_preserved_files() {
+  local rel i=0 changed=0
+  for rel in "${PRESERVE_FILES[@]}"; do
+    local before="${PRESERVE_CHECKSUMS[$i]}"
+    local after
+    after="$(file_checksum "$ROOT/$rel")"
+    if [[ "$before" != "$after" ]]; then
+      fail "Preserved file changed during reinstall: $rel"
+      changed=1
+      SELF_CHECK_FAILURES=$((SELF_CHECK_FAILURES + 1))
+    elif [[ "$before" != "MISSING" ]]; then
+      ok "Preserved $rel (unchanged)"
+    fi
+    i=$((i + 1))
+  done
+  return "$changed"
+}
+
+cleanup_for_reinstall() {
+  step "Step 2a · Reinstall cleanup"
+  hr
+
+  info "Will preserve local config (never touch):"
+  local rel
+  for rel in "${PRESERVE_FILES[@]}"; do
+    if [[ -e "$ROOT/$rel" ]]; then
+      printf '    %s%s%s\n' "$DIM" "$rel" "$RESET"
+    fi
+  done
+
+  snapshot_preserved_files
+
+  if systemctl --user show-environment >/dev/null 2>&1; then
+    if systemctl --user is-active aria-api.service >/dev/null 2>&1; then
+      info "Stopping aria-api.service…"
+      systemctl --user stop aria-api.service 2>/dev/null || warn "Could not stop aria-api.service"
+      ok "Service stopped"
+    fi
+  fi
+
+  if [[ -d "$ROOT/node_modules" ]]; then
+    info "Removing node_modules…"
+    rm -rf "$ROOT/node_modules"
+    ok "node_modules removed"
+  else
+    info "No node_modules directory to remove"
+  fi
+
+  if [[ -d "$ROOT/dist" ]]; then
+    rm -rf "$ROOT/dist"
+    ok "dist removed"
+  fi
+
+  ok "Cleanup complete — local config untouched"
+}
+
 # ── systemd service ───────────────────────────────────────────────────────────
 
 install_systemd_service() {
   step "Step 7 · systemd user service (aria-api)"
   hr
 
-  if ! prompt_yn "Install / update aria-api.service?" "y"; then
+  # Reinstall: refresh unit if it already exists; otherwise ask once.
+  if [[ "$MODE" == "reinstall" ]]; then
+    local unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/aria-api.service"
+    if [[ -f "$unit" ]]; then
+      info "Existing aria-api.service found — refreshing & restarting…"
+    elif ! prompt_yn "No service unit yet — install aria-api.service now?" "y"; then
+      info "Skipped systemd install — run manually: npm start"
+      return 0
+    fi
+  elif ! prompt_yn "Install / update aria-api.service?" "y"; then
     info "Skipped systemd install — run manually: npm start"
     return 0
   fi
 
   if ! systemctl --user show-environment >/dev/null 2>&1; then
     warn "No systemd user bus — cannot start service now"
-    if prompt_yn "Still write unit files for when you log in to the desktop?" "y"; then
-      # install-service.sh will fail on systemctl restart — patch by calling parts manually
+    if [[ "$MODE" == "reinstall" ]] || prompt_yn "Still write unit files for when you log in to the desktop?" "y"; then
       :
     else
       return 0
@@ -508,16 +649,25 @@ install_systemd_service() {
     return 0
   }
 
-  if prompt_yn "Enable linger (keep service running after logout)?" "n"; then
-    if command -v loginctl >/dev/null 2>&1; then
-      sudo loginctl enable-linger "$(whoami)" && ok "Linger enabled for $(whoami)"
-    else
-      warn "loginctl not found"
+  if [[ "$MODE" != "reinstall" ]]; then
+    if prompt_yn "Enable linger (keep service running after logout)?" "n"; then
+      if command -v loginctl >/dev/null 2>&1; then
+        sudo loginctl enable-linger "$(whoami)" && ok "Linger enabled for $(whoami)"
+      else
+        warn "loginctl not found"
+      fi
     fi
-  fi
 
-  if prompt_yn "Install optional heartbeat timer (external watchdog)?" "n"; then
-    bash "$ROOT/deploy/install-heartbeat-timer.sh" || warn "Heartbeat timer install failed"
+    if prompt_yn "Install optional heartbeat timer (external watchdog)?" "n"; then
+      bash "$ROOT/deploy/install-heartbeat-timer.sh" || warn "Heartbeat timer install failed"
+    fi
+  else
+    # Refresh heartbeat timer only if already installed.
+    local hb="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/aria-heartbeat.timer"
+    if [[ -f "$hb" ]]; then
+      info "Refreshing existing heartbeat timer…"
+      bash "$ROOT/deploy/install-heartbeat-timer.sh" || warn "Heartbeat timer refresh failed"
+    fi
   fi
 }
 
@@ -536,66 +686,122 @@ wait_for_health() {
   return 1
 }
 
-run_post_checks() {
-  step "Step 8 · Post-install verification"
+self_check_fail() {
+  fail "$1"
+  SELF_CHECK_FAILURES=$((SELF_CHECK_FAILURES + 1))
+}
+
+run_self_check() {
+  step "Step 8 · Self-check"
   hr
 
-  local api_url
+  SELF_CHECK_FAILURES=0
+  local api_url health_url
   api_url="$(env_get_or AARIA_API_URL http://127.0.0.1:8788)"
-  local health_url="${api_url%/}/health"
+  health_url="${api_url%/}/health"
 
-  # CLI
+  export PATH="$HOME/.local/bin:$PATH"
+
+  # Critical: CLI
   if command -v aaria >/dev/null 2>&1; then
     ok "aaria CLI: $(command -v aaria)"
   else
-    fail "aaria CLI not found on PATH"
+    self_check_fail "aaria CLI not found on PATH"
   fi
 
-  # Files
-  [[ -f "$ROOT/.env" ]]        && ok ".env present"        || fail ".env missing"
-  [[ -f "$ROOT/SOUL.md" ]]     && ok "SOUL.md present"     || warn "SOUL.md missing (optional)"
-  [[ -f "$ROOT/USER.md" ]]     && ok "USER.md present"     || warn "USER.md missing (optional)"
-  [[ -f "$ROOT/MEMORY.md" ]]   && ok "MEMORY.md present"   || warn "MEMORY.md missing (optional)"
-  [[ -x "$ROOT/node_modules/.bin/tsx" ]] && ok "tsx present" || fail "tsx missing"
+  # Critical: deps
+  if [[ -x "$ROOT/node_modules/.bin/tsx" ]]; then
+    ok "tsx present"
+  else
+    self_check_fail "tsx missing after npm install"
+  fi
 
-  # systemd
+  if [[ -d "$ROOT/node_modules" ]] && [[ -f "$ROOT/package.json" ]]; then
+    ok "node_modules installed"
+  else
+    self_check_fail "node_modules missing"
+  fi
+
+  # Critical: .env + API key
+  if [[ -f "$ROOT/.env" ]]; then
+    ok ".env present"
+    local key
+    key="$(env_get CURSOR_API_KEY || true)"
+    if is_placeholder_key "$key"; then
+      self_check_fail "CURSOR_API_KEY missing or still a placeholder"
+    else
+      ok "CURSOR_API_KEY set (${key:0:8}…)"
+    fi
+  else
+    self_check_fail ".env missing"
+  fi
+
+  # Optional persona (warn only)
+  [[ -f "$ROOT/SOUL.md" ]]   && ok "SOUL.md present"   || warn "SOUL.md missing (optional)"
+  [[ -f "$ROOT/USER.md" ]]   && ok "USER.md present"   || warn "USER.md missing (optional)"
+  [[ -f "$ROOT/MEMORY.md" ]] && ok "MEMORY.md present" || warn "MEMORY.md missing (optional)"
+
+  # Reinstall: prove local config was not touched
+  if [[ "$MODE" == "reinstall" ]]; then
+    verify_preserved_files || true
+  fi
+
+  # Service
   if systemctl --user show-environment >/dev/null 2>&1; then
     if systemctl --user is-active aria-api.service >/dev/null 2>&1; then
       ok "aria-api.service is active"
     else
       warn "aria-api.service is not active"
       info "Try: systemctl --user start aria-api.service"
+      local unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/aria-api.service"
+      if [[ "$MODE" == "reinstall" && -f "$unit" ]]; then
+        self_check_fail "aria-api.service unit exists but is not active after reinstall"
+      fi
     fi
+  else
+    warn "systemd user session unavailable — skipped service check"
   fi
 
   # HTTP health
-  info "Waiting for ${health_url}…"
   local health_tries=15
   if ! systemctl --user is-active aria-api.service >/dev/null 2>&1; then
-    # Service not running — quick probe only, don't block ~30s.
     health_tries=3
   fi
+  info "Waiting for ${health_url}…"
   if wait_for_health "$health_url" "$health_tries"; then
     local body
-    body="$(curl -sf --max-time 5 "$health_url")"
+    body="$(curl -sf --max-time 5 "$health_url" || true)"
     ok "API health endpoint reachable"
-
     if command -v python3 >/dev/null 2>&1; then
       printf '%s\n' "$body" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$body"
     else
       printf '%s\n' "$body"
     fi
-
     if printf '%s' "$body" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
       ok "health.ok = true"
     else
-      warn "health response did not report ok:true"
+      self_check_fail "health response did not report ok:true"
     fi
   else
-    warn "Could not reach $health_url"
-    warn "Start manually: systemctl --user start aria-api.service  OR  npm start"
+    if [[ "$MODE" == "reinstall" ]] && systemctl --user is-active aria-api.service >/dev/null 2>&1; then
+      self_check_fail "Could not reach $health_url (service claims active)"
+    else
+      warn "Could not reach $health_url"
+      warn "Start manually: systemctl --user start aria-api.service  OR  npm start"
+    fi
   fi
+
+  hr
+  if [[ "$SELF_CHECK_FAILURES" -gt 0 ]]; then
+    fail "Self-check failed with $SELF_CHECK_FAILURES issue(s)"
+    return 1
+  fi
+  ok "Self-check passed — all critical checks green"
+  return 0
 }
+
+# Keep name used by older docs / callers
+run_post_checks() { run_self_check; }
 
 print_summary() {
   step "Done · Next steps"
@@ -612,22 +818,61 @@ ${GREEN}ARIA ${MODE} complete.${RESET}
 
 ${DIM}Edit persona:${RESET}  SOUL.md · USER.md · MEMORY.md
 ${DIM}Re-run anytime:${RESET} bash deploy/install-upgrade.sh
+${DIM}Reinstall:${RESET}     bash deploy/install-upgrade.sh --reinstall
 
 ${YELLOW}SSH tip:${RESET} ensure ~/.local/bin is on PATH and use ${BOLD}systemctl --user${RESET} without sudo.
 EOF
+}
+
+choose_mode_interactively() {
+  # When an existing install is found and --reinstall was not passed.
+  info "Existing installation detected."
+  printf '\n  %s1%s) Upgrade   — update deps, optionally refresh config\n' "$BOLD" "$RESET"
+  printf '  %s2%s) Reinstall — wipe node_modules & redeploy (keeps .env / SOUL / USER / MEMORY)\n' "$BOLD" "$RESET"
+  printf '  %s3%s) Abort\n\n' "$BOLD" "$RESET"
+  local reply
+  printf 'Choose [1/2/3] (default 1): ' >/dev/tty
+  read -r reply </dev/tty || reply=""
+  reply="${reply:-1}"
+  case "$reply" in
+    1|u|U|upgrade) MODE="upgrade" ;;
+    2|r|R|reinstall)
+      MODE="reinstall"
+      FORCE_REINSTALL=1
+      ;;
+    3|a|A|n|N|abort|q|Q)
+      info "Aborted."
+      exit 0
+      ;;
+    *)
+      warn "Unknown choice — defaulting to upgrade"
+      MODE="upgrade"
+      ;;
+  esac
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 main() {
   clear >/dev/tty 2>&1 || true
-  printf '\n%s%s  AARIA — guided install / upgrade%s\n\n' "$BOLD" "$CYAN" "$RESET"
+  printf '\n%s%s  AARIA — guided install / upgrade / reinstall%s\n\n' "$BOLD" "$CYAN" "$RESET"
   printf '%sRepository:%s %s\n' "$DIM" "$RESET" "$ROOT"
+
+  if [[ "$MODE" == "upgrade" && "$FORCE_REINSTALL" -eq 0 ]]; then
+    choose_mode_interactively
+  fi
+
   printf '%sMode:%s      %s\n' "$DIM" "$RESET" "$MODE"
   hr
 
-  if [[ "$MODE" == "upgrade" ]]; then
-    info "Existing installation detected — this will update deps and optionally refresh config."
+  if [[ "$MODE" == "reinstall" ]]; then
+    info "Reinstall will wipe node_modules and redeploy without changing local config."
+    if ! prompt_yn "Continue with reinstall?" "y"; then
+      info "Aborted."
+      exit 0
+    fi
+  elif [[ "$MODE" == "upgrade" ]]; then
+    info "Upgrade will update deps and optionally refresh config."
     if ! prompt_yn "Continue?" "y"; then
       info "Aborted."
       exit 0
@@ -638,13 +883,30 @@ main() {
   fi
 
   run_prerequisite_checks
+
+  if [[ "$MODE" == "reinstall" ]]; then
+    cleanup_for_reinstall
+  fi
+
   setup_node_and_deps
-  configure_env
-  configure_persona
-  configure_mcp
+
+  if [[ "$MODE" != "reinstall" ]]; then
+    configure_env
+    configure_persona
+    configure_mcp
+  else
+    step "Steps 3–5 · Config skipped (reinstall preserves local files)"
+    hr
+    ok "Keeping existing .env / SOUL.md / USER.md / MEMORY.md / mcp.json"
+  fi
+
   install_cli
   install_systemd_service
-  run_post_checks
+
+  if ! run_self_check; then
+    print_summary
+    exit 1
+  fi
   print_summary
 }
 

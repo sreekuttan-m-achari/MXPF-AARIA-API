@@ -1,12 +1,42 @@
-# Guided interactive install / upgrade for AARIA (API + aaria TUI) on Windows.
+# Guided interactive install / upgrade / reinstall for AARIA (API + aaria TUI) on Windows.
 #Requires -Version 5.1
+param(
+    [switch]$Reinstall,
+    [Alias("h")]
+    [switch]$Help
+)
 $ErrorActionPreference = "Stop"
+
+if ($Help) {
+    Write-Host @"
+AARIA guided install / upgrade / reinstall (Windows)
+
+  powershell -File deploy\install-upgrade.ps1
+  powershell -File deploy\install-upgrade.ps1 -Reinstall
+
+Reinstall wipes node_modules (+ dist) and redeploys. Never touches:
+  .env  SOUL.md  USER.md  MEMORY.md  .cursor\mcp.json
+  .aria-conversations.ndjson  .aria-learn-pending.json
+"@
+    exit 0
+}
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 
 $Script:Issues = 0
 $Script:Warnings = 0
+$Script:SelfCheckFailures = 0
+$Script:PreserveFiles = @(
+    ".env",
+    "SOUL.md",
+    "USER.md",
+    "MEMORY.md",
+    ".cursor\mcp.json",
+    ".aria-conversations.ndjson",
+    ".aria-learn-pending.json"
+)
+$Script:PreserveChecksums = @{}
 
 function Write-Step([string]$Text) { Write-Host ""; Write-Host $Text -ForegroundColor White }
 function Write-Hr() { Write-Host ("─" * 48) -ForegroundColor DarkGray }
@@ -187,6 +217,59 @@ function Invoke-SetupNodeAndDeps {
     if (-not (Test-Path $tsx)) { $tsx = Join-Path $Root "node_modules\.bin\tsx" }
     if (-not (Test-Path $tsx)) { throw "tsx missing after npm install" }
     Write-Ok "tsx ready"
+}
+
+function Get-FileChecksum([string]$Path) {
+    if (-not (Test-Path $Path)) { return "MISSING" }
+    return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash
+}
+
+function Save-PreserveSnapshot {
+    $Script:PreserveChecksums = @{}
+    foreach ($rel in $Script:PreserveFiles) {
+        $Script:PreserveChecksums[$rel] = Get-FileChecksum (Join-Path $Root $rel)
+    }
+}
+
+function Test-PreserveUnchanged {
+    foreach ($rel in $Script:PreserveFiles) {
+        $before = $Script:PreserveChecksums[$rel]
+        $after = Get-FileChecksum (Join-Path $Root $rel)
+        if ($before -ne $after) {
+            Write-Fail "Preserved file changed during reinstall: $rel"
+            $Script:SelfCheckFailures++
+        } elseif ($before -ne "MISSING") {
+            Write-Ok "Preserved $rel (unchanged)"
+        }
+    }
+}
+
+function Invoke-CleanupForReinstall {
+    Write-Step "Step 2a · Reinstall cleanup"
+    Write-Hr
+    Write-Info "Will preserve local config (never touch):"
+    foreach ($rel in $Script:PreserveFiles) {
+        if (Test-Path (Join-Path $Root $rel)) {
+            Write-Host "    $rel" -ForegroundColor DarkGray
+        }
+    }
+    Save-PreserveSnapshot
+
+    $nm = Join-Path $Root "node_modules"
+    if (Test-Path $nm) {
+        Write-Info "Removing node_modules…"
+        Remove-Item -Recurse -Force $nm
+        Write-Ok "node_modules removed"
+    } else {
+        Write-Info "No node_modules directory to remove"
+    }
+
+    $dist = Join-Path $Root "dist"
+    if (Test-Path $dist) {
+        Remove-Item -Recurse -Force $dist
+        Write-Ok "dist removed"
+    }
+    Write-Ok "Cleanup complete — local config untouched"
 }
 
 function Invoke-ConfigureEnv {
@@ -371,7 +454,15 @@ function Invoke-InstallService {
     Write-Step "Step 7 · Background service (Scheduled Task)"
     Write-Hr
 
-    if (-not (Prompt-YesNo "Register ARIA-API scheduled task (start at logon)?" "y")) {
+    $existing = Get-ScheduledTask -TaskName "ARIA-API" -ErrorAction SilentlyContinue
+    if ($Script:Mode -eq "reinstall") {
+        if ($existing) {
+            Write-Info "Existing ARIA-API task found — refreshing…"
+        } elseif (-not (Prompt-YesNo "No ARIA-API task yet — register scheduled task now?" "y")) {
+            Write-Info "Skipped — run in foreground: npm start"
+            return
+        }
+    } elseif (-not (Prompt-YesNo "Register ARIA-API scheduled task (start at logon)?" "y")) {
         Write-Info "Skipped — run in foreground: npm start"
         return
     }
@@ -385,7 +476,17 @@ function Invoke-InstallService {
         return
     }
 
-    if (Prompt-YesNo "Install optional heartbeat timer (external watchdog every 5m)?" "n") {
+    if ($Script:Mode -eq "reinstall") {
+        $hb = Get-ScheduledTask -TaskName "ARIA-Heartbeat" -ErrorAction SilentlyContinue
+        if ($hb) {
+            try {
+                & (Join-Path $PSScriptRoot "install-heartbeat-timer.ps1")
+                Write-Ok "ARIA-Heartbeat task refreshed"
+            } catch {
+                Write-Warn "Heartbeat timer refresh failed: $($_.Exception.Message)"
+            }
+        }
+    } elseif (Prompt-YesNo "Install optional heartbeat timer (external watchdog every 5m)?" "n") {
         try {
             & (Join-Path $PSScriptRoot "install-heartbeat-timer.ps1")
             Write-Ok "ARIA-Heartbeat task installed"
@@ -407,9 +508,10 @@ function Wait-Health([string]$Url, [int]$Tries = 15) {
     return $false
 }
 
-function Invoke-PostChecks {
-    Write-Step "Step 8 · Post-install verification"
+function Invoke-SelfCheck {
+    Write-Step "Step 8 · Self-check"
     Write-Hr
+    $Script:SelfCheckFailures = 0
 
     $apiUrl = Get-EnvValue "AARIA_API_URL"
     if (-not $apiUrl) { $apiUrl = "http://127.0.0.1:8788" }
@@ -420,17 +522,7 @@ function Invoke-PostChecks {
         Write-Ok "aaria CLI installed"
     } else {
         Write-Fail "aaria CLI not found"
-    }
-
-    @(
-        @{ Path = (Join-Path $Root ".env"); Label = ".env"; Required = $true }
-        @{ Path = (Join-Path $Root "SOUL.md"); Label = "SOUL.md"; Required = $false }
-        @{ Path = (Join-Path $Root "USER.md"); Label = "USER.md"; Required = $false }
-        @{ Path = (Join-Path $Root "MEMORY.md"); Label = "MEMORY.md"; Required = $false }
-    ) | ForEach-Object {
-        if (Test-Path $_.Path) { Write-Ok "$($_.Label) present" }
-        elseif ($_.Required) { Write-Fail "$($_.Label) missing" }
-        else { Write-Warn "$($_.Label) missing (optional)" }
+        $Script:SelfCheckFailures++
     }
 
     $tsx = Join-Path $Root "node_modules\.bin\tsx.cmd"
@@ -438,20 +530,52 @@ function Invoke-PostChecks {
         Write-Ok "tsx present"
     } else {
         Write-Fail "tsx missing"
+        $Script:SelfCheckFailures++
+    }
+
+    if (Test-Path (Join-Path $Root "node_modules")) {
+        Write-Ok "node_modules installed"
+    } else {
+        Write-Fail "node_modules missing"
+        $Script:SelfCheckFailures++
+    }
+
+    $envFile = Join-Path $Root ".env"
+    if (Test-Path $envFile) {
+        Write-Ok ".env present"
+        $key = Get-EnvValue "CURSOR_API_KEY"
+        if (Test-PlaceholderKey $key) {
+            Write-Fail "CURSOR_API_KEY missing or still a placeholder"
+            $Script:SelfCheckFailures++
+        } else {
+            $preview = if ($key.Length -gt 8) { $key.Substring(0, 8) + "…" } else { "set" }
+            Write-Ok "CURSOR_API_KEY set ($preview)"
+        }
+    } else {
+        Write-Fail ".env missing"
+        $Script:SelfCheckFailures++
+    }
+
+    foreach ($label in @("SOUL.md", "USER.md", "MEMORY.md")) {
+        if (Test-Path (Join-Path $Root $label)) { Write-Ok "$label present" }
+        else { Write-Warn "$label missing (optional)" }
+    }
+
+    if ($Script:Mode -eq "reinstall") {
+        Test-PreserveUnchanged
     }
 
     $task = Get-ScheduledTask -TaskName "ARIA-API" -ErrorAction SilentlyContinue
     if ($task) {
         Write-Ok "ARIA-API scheduled task registered (state: $($task.State))"
+    } elseif ($Script:Mode -eq "reinstall") {
+        Write-Warn "ARIA-API scheduled task not registered"
     }
 
-    $hb = Get-ScheduledTask -TaskName "ARIA-Heartbeat" -ErrorAction SilentlyContinue
-    if ($hb) {
-        Write-Ok "ARIA-Heartbeat scheduled task registered (state: $($hb.State))"
-    }
-
+    $healthTries = 15
+    if (-not $task -or $task.State -ne "Running") { $healthTries = 3 }
     Write-Info "Waiting for $healthUrl …"
-    if (Wait-Health $healthUrl) {
+    if (Wait-Health $healthUrl $healthTries) {
         try {
             $body = (Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5).Content
             Write-Ok "API health endpoint reachable"
@@ -459,7 +583,8 @@ function Invoke-PostChecks {
             if ($body -match '"ok"\s*:\s*true') {
                 Write-Ok "health.ok = true"
             } else {
-                Write-Warn "health response did not report ok:true"
+                Write-Fail "health response did not report ok:true"
+                $Script:SelfCheckFailures++
             }
         } catch {
             Write-Warn "Health reachable but response read failed"
@@ -467,8 +592,22 @@ function Invoke-PostChecks {
     } else {
         Write-Warn "Could not reach $healthUrl"
         Write-Info "Start manually: Start-ScheduledTask -TaskName ARIA-API  OR  npm start"
+        if ($Script:Mode -eq "reinstall" -and $task -and $task.State -eq "Running") {
+            Write-Fail "Could not reach health while task claims Running"
+            $Script:SelfCheckFailures++
+        }
     }
+
+    Write-Hr
+    if ($Script:SelfCheckFailures -gt 0) {
+        Write-Fail "Self-check failed with $($Script:SelfCheckFailures) issue(s)"
+        return $false
+    }
+    Write-Ok "Self-check passed — all critical checks green"
+    return $true
 }
+
+function Invoke-PostChecks { return Invoke-SelfCheck }
 
 function Write-Summary {
     Write-Step "Done · Next steps"
@@ -489,6 +628,7 @@ ARIA $($Script:Mode) complete.
 
 Edit persona:  SOUL.md · USER.md · MEMORY.md
 Re-run:        powershell -ExecutionPolicy Bypass -File deploy\install-upgrade.ps1
+Reinstall:     powershell -ExecutionPolicy Bypass -File deploy\install-upgrade.ps1 -Reinstall
 
 Tip: TUI auto-start via systemd is Linux-only; on Windows use the scheduled task or npm start.
 "@
@@ -501,17 +641,42 @@ $shim = Join-Path $env:USERPROFILE ".local\bin\aaria.cmd"
 if ((Test-Path (Join-Path $Root ".env")) -or (Test-Path (Join-Path $Root "node_modules")) -or (Test-Path $shim)) {
     $Script:Mode = "upgrade"
 }
+if ($Reinstall) { $Script:Mode = "reinstall" }
 
 Clear-Host
 Write-Host ""
-Write-Host "  AARIA — guided install / upgrade (Windows)" -ForegroundColor Cyan
+Write-Host "  AARIA — guided install / upgrade / reinstall (Windows)" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Repository: $Root"
+
+if ($Script:Mode -eq "upgrade" -and -not $Reinstall) {
+    Write-Info "Existing installation detected."
+    Write-Host ""
+    Write-Host "  1) Upgrade   — update deps, optionally refresh config"
+    Write-Host "  2) Reinstall — wipe node_modules & redeploy (keeps .env / SOUL / USER / MEMORY)"
+    Write-Host "  3) Abort"
+    Write-Host ""
+    $choice = Read-Host "Choose [1/2/3] (default 1)"
+    if ([string]::IsNullOrWhiteSpace($choice)) { $choice = "1" }
+    switch ($choice.ToLower()) {
+        { $_ -in "1", "u", "upgrade" } { $Script:Mode = "upgrade" }
+        { $_ -in "2", "r", "reinstall" } { $Script:Mode = "reinstall" }
+        { $_ -in "3", "a", "n", "abort", "q" } { Write-Info "Aborted."; exit 0 }
+        default { Write-Warn "Unknown choice — defaulting to upgrade"; $Script:Mode = "upgrade" }
+    }
+}
+
 Write-Host "Mode:       $($Script:Mode)"
 Write-Hr
 
-if ($Script:Mode -eq "upgrade") {
-    Write-Info "Existing installation detected — this will update deps and optionally refresh config."
+if ($Script:Mode -eq "reinstall") {
+    Write-Info "Reinstall will wipe node_modules and redeploy without changing local config."
+    if (-not (Prompt-YesNo "Continue with reinstall?" "y")) {
+        Write-Info "Aborted."
+        exit 0
+    }
+} elseif ($Script:Mode -eq "upgrade") {
+    Write-Info "Upgrade will update deps and optionally refresh config."
     if (-not (Prompt-YesNo "Continue?" "y")) {
         Write-Info "Aborted."
         exit 0
@@ -522,11 +687,21 @@ if ($Script:Mode -eq "upgrade") {
 }
 
 Invoke-PrerequisiteChecks
+if ($Script:Mode -eq "reinstall") { Invoke-CleanupForReinstall }
 Invoke-SetupNodeAndDeps
-Invoke-ConfigureEnv
-Invoke-ConfigurePersona
-Invoke-ConfigureMcp
+
+if ($Script:Mode -ne "reinstall") {
+    Invoke-ConfigureEnv
+    Invoke-ConfigurePersona
+    Invoke-ConfigureMcp
+} else {
+    Write-Step "Steps 3–5 · Config skipped (reinstall preserves local files)"
+    Write-Hr
+    Write-Ok "Keeping existing .env / SOUL.md / USER.md / MEMORY.md / mcp.json"
+}
+
 Invoke-InstallCli
 Invoke-InstallService
-Invoke-PostChecks
+$ok = Invoke-SelfCheck
 Write-Summary
+if (-not $ok) { exit 1 }
