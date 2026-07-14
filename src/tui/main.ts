@@ -311,6 +311,7 @@ async function main(): Promise<void> {
         return;
       }
 
+      const hadContinuation = continuation.length > 0;
       const text = `${continuation}${line}`.trim();
       continuation = "";
       rl.setPrompt(userPrefix(userName));
@@ -320,11 +321,14 @@ async function main(): Promise<void> {
         return;
       }
 
-      await processUserInput(text);
+      await processUserInput(text, { alreadyDisplayed: !hadContinuation });
     })();
   });
 
-  async function processUserInput(text: string): Promise<void> {
+  async function processUserInput(
+    text: string,
+    options?: { alreadyDisplayed?: boolean },
+  ): Promise<void> {
     const lower = text.toLowerCase();
       if (lower === "/quit" || lower === "/exit") {
         output.write(`${c.dim}bye${c.reset}\n`);
@@ -407,7 +411,8 @@ async function main(): Promise<void> {
       streaming = true;
       suspendInput();
 
-      if (!text.startsWith("/")) {
+      // readline already echoed normal typed lines; only print for paste-draft sends.
+      if (!text.startsWith("/") && !options?.alreadyDisplayed) {
         output.write(`\n${userPrefix(userName)}${text}\n`);
       }
 
