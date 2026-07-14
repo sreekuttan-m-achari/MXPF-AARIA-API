@@ -160,10 +160,11 @@ check_path_local_bin() {
 run_prerequisite_checks() {
   step "Step 1 · Prerequisites"
   hr
-  check_command git
-  check_command curl
-  check_command npm
-  check_command sed
+  # || true so set -e does not abort before we can report all issues.
+  check_command git || true
+  check_command curl || true
+  check_command npm || true
+  check_command sed || true
   check_user_systemd || true
   check_port_8788 || true
   check_path_local_bin || true
@@ -178,9 +179,10 @@ run_prerequisite_checks() {
     PREREQ_WARNINGS=$((PREREQ_WARNINGS + 1))
   fi
 
+  # Run in the current shell (already cd'd to ROOT) so PATH from nvm use sticks.
   if [[ -s "$NVM_DIR/nvm.sh" ]]; then
-    (cd "$ROOT" && nvm install >/dev/null 2>&1 || true)
-    (cd "$ROOT" && nvm use >/dev/null 2>&1 || true)
+    nvm install >/dev/null 2>&1 || true
+    nvm use >/dev/null 2>&1 || true
   fi
   check_node_version "$(command -v node || echo node)" || true
 
@@ -206,7 +208,9 @@ setup_node_and_deps() {
     # shellcheck source=/dev/null
     . "$NVM_DIR/nvm.sh"
     info "Installing Node from .nvmrc…"
-    (cd "$ROOT" && nvm install && nvm use)
+    # Must not use a subshell — nvm use only updates PATH in the current shell.
+    nvm install
+    nvm use
     ok "Node $(node -v) active"
   fi
 
@@ -227,6 +231,18 @@ env_get() {
   local key="$1" file="${2:-$ROOT/.env}"
   [[ -f "$file" ]] || return 1
   grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^["'\''"]//;s/["'\''"]$//' || true
+}
+
+# env_get exits 0 with an empty string when the key is missing — so
+# `$(env_get KEY || echo default)` never uses the default. Use this instead.
+env_get_or() {
+  local key="$1" default="$2" value
+  value="$(env_get "$key" || true)"
+  if [[ -n "$value" ]]; then
+    printf '%s' "$value"
+  else
+    printf '%s' "$default"
+  fi
 }
 
 env_set() {
@@ -283,8 +299,8 @@ configure_env() {
 
   if prompt_yn "Configure optional API URL / port?" "n"; then
     local host port url
-    host="$(prompt_value "AARIA_WS_HOST" "$(env_get AARIA_WS_HOST || echo 127.0.0.1)")"
-    port="$(prompt_value "AARIA_WS_PORT" "$(env_get AARIA_WS_PORT || echo 8788)")"
+    host="$(prompt_value "AARIA_WS_HOST" "$(env_get_or AARIA_WS_HOST 127.0.0.1)")"
+    port="$(prompt_value "AARIA_WS_PORT" "$(env_get_or AARIA_WS_PORT 8788)")"
     url="$(prompt_value "AARIA_API_URL" "http://${host}:${port}")"
     env_set AARIA_WS_HOST "$host"
     env_set AARIA_WS_PORT "$port"
@@ -395,7 +411,7 @@ configure_mcp() {
 
     if prompt_yn "Configure Home Assistant token in .env now?" "n"; then
       local ha_url ha_token
-      ha_url="$(prompt_value "HA_BASE_URL" "$(env_get HA_BASE_URL || echo http://homeassistant.local:8123)")"
+      ha_url="$(prompt_value "HA_BASE_URL" "$(env_get_or HA_BASE_URL http://homeassistant.local:8123)")"
       ha_token="$(prompt_value "HA_API_ACCESS_TOKEN" "" 1)"
       env_set HA_BASE_URL "$ha_url"
       env_set HA_MCP_HTTP_URL "${ha_url%/}/api/mcp"
@@ -509,7 +525,7 @@ install_systemd_service() {
 
 wait_for_health() {
   local url="${1:-http://127.0.0.1:8788/health}"
-  local tries=15
+  local tries="${2:-15}"
   local i
   for ((i = 1; i <= tries; i++)); do
     if curl -sf --max-time 3 "$url" >/dev/null 2>&1; then
@@ -525,7 +541,7 @@ run_post_checks() {
   hr
 
   local api_url
-  api_url="$(env_get AARIA_API_URL || echo http://127.0.0.1:8788)"
+  api_url="$(env_get_or AARIA_API_URL http://127.0.0.1:8788)"
   local health_url="${api_url%/}/health"
 
   # CLI
@@ -554,7 +570,12 @@ run_post_checks() {
 
   # HTTP health
   info "Waiting for ${health_url}…"
-  if wait_for_health "$health_url"; then
+  local health_tries=15
+  if ! systemctl --user is-active aria-api.service >/dev/null 2>&1; then
+    # Service not running — quick probe only, don't block ~30s.
+    health_tries=3
+  fi
+  if wait_for_health "$health_url" "$health_tries"; then
     local body
     body="$(curl -sf --max-time 5 "$health_url")"
     ok "API health endpoint reachable"
@@ -580,12 +601,12 @@ print_summary() {
   step "Done · Next steps"
   hr
   local api_url
-  api_url="$(env_get AARIA_API_URL || echo http://127.0.0.1:8788)"
+  api_url="$(env_get_or AARIA_API_URL http://127.0.0.1:8788)"
   cat <<EOF
 ${GREEN}ARIA ${MODE} complete.${RESET}
 
   ${BOLD}Terminal${RESET}     aaria
-  ${BOLD}Health${RESET}       curl -s ${api_url:-http://127.0.0.1:8788}/health | python3 -m json.tool
+  ${BOLD}Health${RESET}       curl -s ${api_url}/health | python3 -m json.tool
   ${BOLD}Service${RESET}      systemctl --user status aria-api.service
   ${BOLD}Logs${RESET}         journalctl --user -u aria-api.service -f
 
