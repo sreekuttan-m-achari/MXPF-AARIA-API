@@ -70,6 +70,7 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET`  | `/health` | Status: name, version, session id, warm flag, greeting, persona/MCP/memory stats, scheduler summary |
+| `GET`  | `/cursor` | Cursor API config (model, masked key), account, token usage, available models |
 | `GET`  | `/heartbeat` | Last in-process heartbeat snapshot (RAM, load, warnings) |
 | `GET`  | `/jobs` | All configured jobs with last/next run state |
 | `POST` | `/jobs/run` | `{ "id": "heartbeat" }` — run a job immediately |
@@ -287,6 +288,8 @@ All settings are environment variables (see `.env-sample`). Common ones:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CURSOR_API_KEY` | — | **Required.** Cursor platform key |
+| `AARIA_MODEL` | `default` (Auto) | Cursor model id (`default`, `composer-2`, `composer-2.5`, …). List with SDK `Cursor.models.list` |
+| `AARIA_LEARN_MODEL` | same as `AARIA_MODEL` default (`default`) | Model for learn/curator agent |
 | `AARIA_WS_HOST` | `127.0.0.1` (`0.0.0.0` in Docker) | Bind address |
 | `AARIA_WS_PORT` | `8788` | HTTP/WS port |
 | `AARIA_API_URL` | `http://127.0.0.1:8788` | Base URL the TUI/health client dials |
@@ -311,6 +314,36 @@ All settings are environment variables (see `.env-sample`). Common ones:
 | `AARIA_HEARTBEAT_EVERY` | `5m` | Default heartbeat interval (`30s`, `5m`, `1h`, …) |
 | `AARIA_MORNING_BRIEF` | on | First WebSocket connect each day triggers a morning brief |
 | `AARIA_TIMEZONE` | — | Override `USER.md` timezone for daily brief (default `Asia/Kolkata`) |
+| `AARIA_VOICE` | on if backend found | Set `0` to disable local TTS done lines |
+| `AARIA_TTS` | `auto` | `auto` \| `piper` \| `spd-say` |
+| `AARIA_PIPER_MODEL` | auto-discover | Path to Piper `.onnx` voice |
+| `AARIA_VOICE_MAX_CHARS` | `280` | Max chars for spoken snippets |
+
+### Voice reply (local TTS)
+
+The API speaks a **short done** line when an interactive chat turn finishes (TUI, plasmoid, HTTP/WS) — not your message, and not the full technical reply. Scheduler jobs and morning briefs stay silent. No extra Cursor tokens — text is clipped with heuristics.
+
+**Character voice:** British English Piper **Cori** (`en_GB-cori-medium`) by default — calm, composed, FRIDAY-like. Pace defaults to `AARIA_PIPER_LENGTH_SCALE=1.06`.
+
+**Latency:** the TUI calls `POST /voice/warmup` on boot to pre-load Piper before the first reply. The API also warms Piper in the background at process start.
+
+Backends (auto-detected):
+
+1. **Piper** — if `piper` is on `PATH`, a `.onnx` model is found, and `paplay` / `pw-play` / `aplay` is available
+2. **`spd-say`** — Speech Dispatcher (`en-GB` preferred)
+3. Off — chat still works
+
+Download Cori (recommended):
+
+```bash
+mkdir -p ~/.local/share/piper && cd ~/.local/share/piper
+curl -fsSL -o en_GB-cori-medium.onnx \
+  "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/cori/medium/en_GB-cori-medium.onnx?download=true"
+curl -fsSL -o en_GB-cori-medium.onnx.json \
+  "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/cori/medium/en_GB-cori-medium.onnx.json?download=true"
+```
+
+Startup logs which engine is active: `[aria-voice] engine=…`.
 
 ### Morning brief (first connect)
 

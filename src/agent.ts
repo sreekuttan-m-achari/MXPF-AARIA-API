@@ -10,6 +10,7 @@ import {
 
 import { agentCwd } from "./persona.js";
 import { loadMcpServersForSdk } from "./config/mcp.js";
+import { resolveModelSelection } from "./config/model.js";
 import { loadPersistedAgentId, persistAgentId } from "./session.js";
 
 export type AriaAgent = Awaited<ReturnType<typeof Agent.create>>;
@@ -63,7 +64,8 @@ export async function createAgent(): Promise<AriaAgent> {
 
   const cwd = agentCwd();
   const local = await localOptions(cwd);
-  const model = { id: "composer-2" as const };
+  const model = resolveModelSelection("AARIA_MODEL");
+  console.error(`[aria-agent] model=${model.id}`);
   const mcp = sdkMcpServers(cwd);
   const persistedId = loadPersistedAgentId(cwd);
 

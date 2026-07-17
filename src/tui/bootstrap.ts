@@ -33,6 +33,52 @@ export async function fetchHealth(): Promise<Health> {
   return (await res.json()) as Health;
 }
 
+/** Speak text on the API host (fire-and-forget from the TUI). */
+export async function speakOnServer(
+  text: string,
+  kind: "greeting" | "raw" = "raw",
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${apiBase()}/voice/speak`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, kind }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { spoken?: boolean };
+    return Boolean(body.spoken);
+  } catch {
+    return false;
+  }
+}
+
+/** Pre-warm Piper on the API host so first spoken reply has low latency. */
+export async function warmVoiceEngine(): Promise<{
+  ok: boolean;
+  engine?: string;
+  ms?: number;
+  skipped?: boolean;
+}> {
+  try {
+    const res = await fetch(`${apiBase()}/voice/warmup`, {
+      method: "POST",
+      signal: AbortSignal.timeout(50_000),
+    });
+    if (!res.ok) {
+      return { ok: false };
+    }
+    return (await res.json()) as {
+      ok: boolean;
+      engine?: string;
+      ms?: number;
+      skipped?: boolean;
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
 function startServerViaSystemd(): Promise<void> {
   const service = systemdServiceName();
   return new Promise((resolve, reject) => {

@@ -13,6 +13,7 @@
     "start": "tsx src/main.ts",
     "dev": "tsx watch src/main.ts",
     "tui": "tsx src/tui/main.ts",
+    "test": "tsx --test src/__tests__/**/*.test.ts",
     "install-cli": "bash deploy/install-cli.sh",
     "install-cli:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-cli.ps1",
     "install-service": "bash deploy/install-service.sh",

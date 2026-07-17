@@ -2,7 +2,7 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { ensureServerReady, fetchHealth, systemdServiceName, type Health } from "./bootstrap.js";
+import { ensureServerReady, fetchHealth, speakOnServer, systemdServiceName, warmVoiceEngine, type Health } from "./bootstrap.js";
 import { AriaWsClient } from "./client.js";
 import {
   completeLine,
@@ -82,9 +82,40 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  loader.setPhase("priming voice");
+  const voiceWarm = await warmVoiceEngine();
+  if (voiceWarm.ok && voiceWarm.ms && voiceWarm.ms > 0) {
+    loader.setPhase(`voice ready (${voiceWarm.ms}ms)`);
+  }
+
   const client = new AriaWsClient();
   let userName: string | undefined;
   let briefStreaming = false;
+  let spokeStartupGreeting = false;
+  let pendingGreeting: string | undefined;
+  let bootUiReady = false;
+
+  const presentGreeting = (text: string): void => {
+    const line = text.trim();
+    if (!line || spokeStartupGreeting) return;
+    spokeStartupGreeting = true;
+    output.write(`${agentPrefix()}${colorizeReplyChunk(line)}\n\n`);
+    void speakOnServer(line, "greeting");
+  };
+
+  const queueOrPresentGreeting = (text: string): void => {
+    const line = text.trim();
+    if (!line || spokeStartupGreeting) return;
+    if (bootUiReady) {
+      presentGreeting(line);
+      return;
+    }
+    pendingGreeting = line;
+  };
+
+  client.onGreeting((text) => {
+    queueOrPresentGreeting(text);
+  });
 
   client.onMorningBrief({
     onChunk: (text) => {
@@ -132,7 +163,8 @@ async function main(): Promise<void> {
     }
     const greeting = ready.greeting || health.greeting;
     if (greeting?.trim()) {
-      output.write(`${agentPrefix()}${colorizeReplyChunk(greeting.trim())}\n\n`);
+      // Defer until after help — show just above the user prompt.
+      pendingGreeting = greeting.trim();
     } else if (!health.warm) {
       output.write(`${c.gold}◌${c.reset} ${c.dim}Warming up…${c.reset}\n\n`);
     }
@@ -270,12 +302,17 @@ async function main(): Promise<void> {
     } finally {
       flushStdin(input);
       resetPromptInput();
+      // Re-enable bracketed paste in case Ink left the terminal without it.
+      if (output.isTTY) {
+        output.write("\x1b[?2004h");
+      }
       if (interactive && "setMuted" in readlineInput) {
         (readlineInput as { setMuted: (m: boolean) => void }).setMuted(false);
       }
       opsOpen = false;
       restoreReadlineTty();
       resumeInput();
+      // Banner on a fresh line under the restored chat transcript.
       output.write(`\n ${ariaWordmark()} ${c.dim}back to light TUI${c.reset}\n\n`);
       prompt();
     }
@@ -290,6 +327,18 @@ async function main(): Promise<void> {
   const finishTurn = (): void => {
     activeTurn?.end();
     activeTurn = undefined;
+    streaming = false;
+    currentChatId = undefined;
+    resumeInput();
+    output.write("\n\n");
+    prompt();
+  };
+
+  /** End the spinner first, then print status — otherwise CLEAR_LINE wipes the message. */
+  const finishTurnWithMessage = (writeMsg: () => void): void => {
+    activeTurn?.end();
+    activeTurn = undefined;
+    writeMsg();
     streaming = false;
     currentChatId = undefined;
     resumeInput();
@@ -328,6 +377,9 @@ async function main(): Promise<void> {
     }
     clearHint();
     if (streaming && currentChatId) {
+      // Kill the spinner immediately so an idle timer cannot stack more
+      // "working…" lines while we wait for the cancel ack.
+      activeTurn?.end();
       output.write(`\n${c.dim}cancelling…${c.reset}\n`);
       client.cancel(currentChatId);
       return;
@@ -372,6 +424,11 @@ async function main(): Promise<void> {
       }
       if (key?.ctrl && key.name === "o") {
         void openOps();
+        return;
+      }
+      // Bare Esc after ops must not disturb the prompt (Esc exits Ink and can
+      // still fire a light-mode keypress on some terminals).
+      if (key?.name === "escape" && !draftMessage) {
         return;
       }
       if (draftMessage && key?.name === "escape") {
@@ -552,25 +609,28 @@ async function main(): Promise<void> {
             turn.onChunk(chunk);
           },
           onDone: (reply) => {
-            if (!turn.hasContent) {
-              output.write(`${agentPrefix()}${c.dim}(no reply)${c.reset}`);
-            } else if (reply?.trim()) {
-              pushChatHistory("assistant", reply);
-            }
-            finishTurn();
+            finishTurnWithMessage(() => {
+              if (!turn.hasContent) {
+                output.write(`${agentPrefix()}${c.dim}(no reply)${c.reset}`);
+              } else if (reply?.trim()) {
+                pushChatHistory("assistant", reply);
+              }
+            });
           },
           onCancelled: (partial) => {
-            if (partial) {
-              output.write(`\n${c.dim}(cancelled)${c.reset}`);
-              pushChatHistory("assistant", partial);
-            } else {
-              output.write(`\n${c.dim}cancelled${c.reset}`);
-            }
-            finishTurn();
+            finishTurnWithMessage(() => {
+              if (partial) {
+                output.write(`${c.dim}(cancelled)${c.reset}`);
+                pushChatHistory("assistant", partial);
+              } else {
+                output.write(`${c.dim}cancelled${c.reset}`);
+              }
+            });
           },
           onError: (message) => {
-            output.write(`\n${c.err}${message}${c.reset}`);
-            finishTurn();
+            finishTurnWithMessage(() => {
+              output.write(`${c.err}${message}${c.reset}`);
+            });
           },
         });
       } catch (err) {
@@ -775,6 +835,11 @@ async function main(): Promise<void> {
   });
 
   printHelp();
+  bootUiReady = true;
+  if (pendingGreeting) {
+    presentGreeting(pendingGreeting);
+    pendingGreeting = undefined;
+  }
   prompt();
 }
 

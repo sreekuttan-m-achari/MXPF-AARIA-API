@@ -86,6 +86,65 @@ export async function rejectPending(id: string): Promise<void> {
   await postJson("/memory/reject", { id });
 }
 
+export type CursorStatus = {
+  ok: boolean;
+  config: {
+    model: string;
+    learnModel: string;
+    apiKeyConfigured: boolean;
+    apiKeyHint: string;
+    agentCwd: string;
+    sessionId?: string;
+    warm: boolean;
+    sdkVersion?: string;
+  };
+  account: {
+    apiKeyName: string;
+    userId?: number;
+    userEmail?: string;
+    userFirstName?: string;
+    userLastName?: string;
+    createdAt: string;
+  } | null;
+  accountError?: string;
+  models: { at: string; count: number; ids: string[] } | null;
+  usage: {
+    since: string;
+    runs: { total: number; finished: number; error: number; cancelled: number };
+    tokens: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheWriteTokens: number;
+      totalTokens: number;
+      reasoningTokens: number;
+    };
+    lastRun: {
+      at: string;
+      id: string;
+      status: string;
+      model?: string;
+      durationMs?: number;
+      usage?: {
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens: number;
+      };
+    } | null;
+    recent: Array<{
+      at: string;
+      id: string;
+      status: string;
+      model?: string;
+      durationMs?: number;
+    }>;
+  };
+};
+
+export async function fetchCursorStatus(): Promise<CursorStatus> {
+  return getJson<CursorStatus>("/cursor");
+}
+
 export function opsEnabled(): boolean {
   const raw = process.env.AARIA_OPS?.trim().toLowerCase();
   if (raw === "0" || raw === "false" || raw === "off" || raw === "no") {

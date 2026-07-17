@@ -9,14 +9,14 @@ import {
 } from "@cursor/sdk";
 
 import { agentCwd } from "../persona.js";
+import { resolveModelId, resolveModelSelection } from "../config/model.js";
 
 export type ReviewAgent = Awaited<ReturnType<typeof Agent.create>>;
 
 let reviewAgent: ReviewAgent | undefined;
 
 function learnModelId(): string {
-  const override = process.env.AARIA_LEARN_MODEL?.trim();
-  return override && override.length > 0 ? override : "composer-2";
+  return resolveModelId("AARIA_LEARN_MODEL");
 }
 
 async function sqliteAvailable(): Promise<boolean> {
@@ -56,7 +56,7 @@ export async function getReviewAgent(): Promise<ReviewAgent> {
 
   const cwd = agentCwd();
   const local = await reviewLocalOptions(cwd);
-  const model = { id: learnModelId() as "composer-2" };
+  const model = resolveModelSelection("AARIA_LEARN_MODEL");
 
   try {
     reviewAgent = await Agent.create({

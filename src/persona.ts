@@ -12,6 +12,7 @@ import {
   resolveMemoryFilePath,
 } from "./learn/memory-store.js";
 import { formatSkillsIndex } from "./skills/index.js";
+import { voiceCapabilitySummary } from "./tts.js";
 
 const DEFAULT_CANDIDATES = ["SOUL.md", "PROFILE.md"] as const;
 
@@ -109,6 +110,10 @@ function buildBootstrapUserMessage(
       userContext.trim(),
     );
   }
+  const voice = voiceCapabilitySummary();
+  if (voice) {
+    parts.push("", "---", "", voice);
+  }
   return parts.join("\n");
 }
 
@@ -170,6 +175,10 @@ export function buildGreetingPrompt(userContext?: string): string {
       "",
       userContext.trim(),
     );
+  }
+  const voice = voiceCapabilitySummary();
+  if (voice) {
+    parts.push("", voice);
   }
   return parts.join("\n");
 }

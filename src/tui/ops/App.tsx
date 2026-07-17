@@ -4,12 +4,14 @@ import { Box, Text, useApp, useInput } from "ink";
 import type { Health } from "../bootstrap.js";
 import {
   approvePending,
+  fetchCursorStatus,
   fetchHeartbeat,
   fetchJobs,
   fetchOpsHealth,
   fetchPending,
   rejectPending,
   runJob,
+  type CursorStatus,
   type HeartbeatSnapshot,
   type JobState,
   type PendingEntry,
@@ -17,14 +19,15 @@ import {
 import { listChatHistory, type ChatHistoryEntry } from "./history.js";
 import { ringPush, sparkline } from "./sparkline.js";
 
-type Panel = "health" | "jobs" | "memory" | "chat";
+type Panel = "health" | "jobs" | "memory" | "chat" | "cursor";
 
-const PANELS: Panel[] = ["health", "jobs", "memory", "chat"];
+const PANELS: Panel[] = ["health", "jobs", "memory", "chat", "cursor"];
 const PANEL_LABEL: Record<Panel, string> = {
   health: "Health",
   jobs: "Jobs",
   memory: "Memory",
   chat: "Chat",
+  cursor: "Cursor",
 };
 
 const TABS: Record<Panel, string[]> = {
@@ -32,6 +35,7 @@ const TABS: Record<Panel, string[]> = {
   jobs: ["Overview", "Detail"],
   memory: ["Pending", "Help"],
   chat: ["Preview"],
+  cursor: ["Config", "Usage", "Account"],
 };
 
 function gauge(pct: number, width = 20): string {
@@ -87,6 +91,7 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
   const [jobs, setJobs] = useState<JobState[]>([]);
   const [pending, setPending] = useState<PendingEntry[]>([]);
   const [chat, setChat] = useState<ChatHistoryEntry[]>(() => listChatHistory());
+  const [cursor, setCursor] = useState<CursorStatus | null>(null);
   const [memSeries, setMemSeries] = useState<number[]>([]);
   const [loadSeries, setLoadSeries] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
@@ -109,16 +114,18 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
 
   const refresh = useCallback(async () => {
     try {
-      const [h, snapshot, j, p] = await Promise.all([
+      const [h, snapshot, j, p, cur] = await Promise.all([
         fetchOpsHealth(),
         fetchHeartbeat(),
         fetchJobs(),
         fetchPending(),
+        fetchCursorStatus(),
       ]);
       setHealth(h);
       setHb(snapshot);
       setJobs(j);
       setPending(p);
+      setCursor(cur);
       setChat(listChatHistory());
       if (snapshot) {
         setMemSeries((prev) => {
@@ -221,6 +228,10 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
       setPanel("chat");
       return;
     }
+    if (input === "5") {
+      setPanel("cursor");
+      return;
+    }
     if (key.leftArrow || input === "[") {
       setTabIdx((i) => (i - 1 + tabs.length) % tabs.length);
       return;
@@ -257,7 +268,7 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
   });
 
   const hints = useMemo(() => {
-    const base = "1-4 panels · ←/→ tabs · ↑/↓ list · q exit";
+    const base = "1-5 panels · ←/→ tabs · ↑/↓ list · q exit";
     if (panel === "jobs") {
       return `${base} · r run job`;
     }
@@ -325,6 +336,9 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
               <MemoryView tab={tabs[tabIdxClamped]!} pending={pending} selected={listIdx} />
             )}
             {panel === "chat" && <ChatView chat={chat} selected={listIdx} />}
+            {panel === "cursor" && (
+              <CursorView tab={tabs[tabIdxClamped]!} cursor={cursor} />
+            )}
           </Box>
         </Box>
       </Box>
@@ -546,3 +560,177 @@ function ChatView(props: {
     </Box>
   );
 }
+
+function CursorView(props: {
+  tab: string;
+  cursor: CursorStatus | null;
+}): React.ReactElement {
+  const { tab, cursor } = props;
+  if (!cursor) {
+    return <Text dimColor>Loading Cursor status…</Text>;
+  }
+
+  if (tab === "Usage") {
+    const u = cursor.usage;
+    const t = u.tokens;
+    return (
+      <Box flexDirection="column">
+        <Text bold>Session usage</Text>
+        <Text dimColor>since {fmtAgo(u.since)} · process lifetime</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text>
+            <Text bold>Runs </Text>
+            {u.runs.total} total ·{" "}
+            <Text color="green">{u.runs.finished} ok</Text>
+            {" · "}
+            <Text color="red">{u.runs.error} err</Text>
+            {" · "}
+            <Text color="yellow">{u.runs.cancelled} cancel</Text>
+          </Text>
+          <Text>
+            <Text bold>Tokens </Text>
+            total {t.totalTokens.toLocaleString()} · in {t.inputTokens.toLocaleString()} · out{" "}
+            {t.outputTokens.toLocaleString()}
+          </Text>
+          <Text dimColor>
+            cache read {t.cacheReadTokens.toLocaleString()} · write{" "}
+            {t.cacheWriteTokens.toLocaleString()}
+            {t.reasoningTokens > 0 ? ` · reasoning ${t.reasoningTokens.toLocaleString()}` : ""}
+          </Text>
+        </Box>
+        {u.lastRun && (
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>Last run</Text>
+            <Text>
+              <Text color={statusColor(u.lastRun.status === "finished" ? "ok" : u.lastRun.status)}>
+                {u.lastRun.status}
+              </Text>
+              {" · "}
+              {u.lastRun.model ?? "?"}
+              {u.lastRun.durationMs != null ? ` · ${u.lastRun.durationMs}ms` : ""}
+            </Text>
+            <Text dimColor>
+              {u.lastRun.id.slice(0, 18)}… · {fmtAgo(u.lastRun.at)}
+            </Text>
+            {u.lastRun.usage && (
+              <Text dimColor>
+                tokens in {u.lastRun.usage.inputTokens} / out {u.lastRun.usage.outputTokens} / total{" "}
+                {u.lastRun.usage.totalTokens}
+              </Text>
+            )}
+          </Box>
+        )}
+        {u.recent.length > 0 && (
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>Recent</Text>
+            {u.recent.slice(0, 6).map((r) => (
+              <Text key={r.id + r.at} dimColor>
+                {r.status.padEnd(9)} {(r.model ?? "?").padEnd(12)}{" "}
+                {r.durationMs != null ? `${r.durationMs}ms` : "—"}
+              </Text>
+            ))}
+          </Box>
+        )}
+        {u.runs.total === 0 && (
+          <Text dimColor>No runs yet this process — chat in light mode to accumulate usage.</Text>
+        )}
+      </Box>
+    );
+  }
+
+  if (tab === "Account") {
+    if (cursor.accountError && !cursor.account) {
+      return (
+        <Box flexDirection="column">
+          <Text color="red">Account lookup failed</Text>
+          <Text dimColor>{cursor.accountError}</Text>
+        </Box>
+      );
+    }
+    const a = cursor.account;
+    if (!a) {
+      return <Text dimColor>No account info.</Text>;
+    }
+    const name = [a.userFirstName, a.userLastName].filter(Boolean).join(" ");
+    return (
+      <Box flexDirection="column">
+        <Text bold>Cursor account</Text>
+        <Text>
+          <Text bold>Key </Text>
+          {a.apiKeyName}
+        </Text>
+        {name ? (
+          <Text>
+            <Text bold>User </Text>
+            {name}
+          </Text>
+        ) : null}
+        {a.userEmail ? (
+          <Text>
+            <Text bold>Email </Text>
+            {a.userEmail}
+          </Text>
+        ) : null}
+        {a.userId != null ? (
+          <Text dimColor>userId {a.userId}</Text>
+        ) : (
+          <Text dimColor>team/service key (no userId)</Text>
+        )}
+        <Text dimColor>key created {fmtAgo(a.createdAt)}</Text>
+      </Box>
+    );
+  }
+
+  // Config
+  const c = cursor.config;
+  const modelIds = cursor.models?.ids ?? [];
+  const modelMarked = modelIds.includes(c.model);
+  return (
+    <Box flexDirection="column">
+      <Text bold>Cursor API config</Text>
+      <Text>
+        <Text bold>Model </Text>
+        <Text color="cyan">{c.model}</Text>
+        {c.model === "default" ? <Text dimColor> (Auto)</Text> : null}
+      </Text>
+      <Text>
+        <Text bold>Learn </Text>
+        {c.learnModel}
+      </Text>
+      <Text>
+        <Text bold>API key </Text>
+        {c.apiKeyConfigured ? (
+          <Text color="green">{c.apiKeyHint}</Text>
+        ) : (
+          <Text color="red">unset</Text>
+        )}
+      </Text>
+      <Text>
+        <Text bold>Session </Text>
+        {c.sessionId ? `${c.sessionId.slice(0, 20)}…` : "—"}
+        {" · "}
+        {c.warm ? <Text color="green">warm</Text> : <Text color="yellow">cold</Text>}
+      </Text>
+      {c.sdkVersion ? (
+        <Text dimColor>@cursor/sdk {c.sdkVersion}</Text>
+      ) : null}
+      <Text dimColor>cwd {c.agentCwd}</Text>
+      {cursor.models && (
+        <Box marginTop={1} flexDirection="column">
+          <Text bold>
+            Models available ({cursor.models.count})
+          </Text>
+          <Text dimColor>
+            {modelIds.slice(0, 8).join(", ")}
+            {modelIds.length > 8 ? "…" : ""}
+          </Text>
+          {!modelMarked && c.model !== "default" && (
+            <Text color="yellow">current model not in catalog list</Text>
+          )}
+          <Text dimColor>Override with AARIA_MODEL / AARIA_LEARN_MODEL in .env</Text>
+        </Box>
+      )}
+    </Box>
+  );
+}
+

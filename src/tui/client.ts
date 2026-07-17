@@ -35,6 +35,7 @@ export type ChatHandlers = {
 };
 
 export type LearnHandler = (event: LearnedEvent) => void;
+export type GreetingHandler = (text: string) => void;
 
 export class AriaWsClient {
   private ws: WebSocket | undefined;
@@ -42,6 +43,7 @@ export class AriaWsClient {
   private activeHandlers: ChatHandlers | undefined;
   private learnHandler: LearnHandler | undefined;
   private morningBriefHandler: MorningBriefHandler | undefined;
+  private greetingHandler: GreetingHandler | undefined;
 
   async connect(): Promise<{
     greeting?: string;
@@ -83,6 +85,7 @@ export class AriaWsClient {
         }
 
         if (msg.type === "greeting") {
+          this.greetingHandler?.(msg.text);
           return;
         }
 
@@ -145,6 +148,10 @@ export class AriaWsClient {
 
   onLearned(handler: LearnHandler): void {
     this.learnHandler = handler;
+  }
+
+  onGreeting(handler: GreetingHandler): void {
+    this.greetingHandler = handler;
   }
 
   onMorningBrief(handler: MorningBriefHandler): void {
