@@ -7,21 +7,28 @@
 **AARIA** (always two A's — **A**·**A**·RIA, short form *ARIA*) is a local, Cursor-SDK
 powered assistant that lives in your terminal and runs as a background service. She owns
 the **professional lane**: code, DevOps, servers, infrastructure, and planning. Her
-sibling **Amelia** owns the **home lane** (personal life + Home Assistant) and runs as a
-separate service. AARIA hands home/personal requests to Amelia and keeps the work desk
-for herself.
+sibling **Amelia** owns the **home lane** (personal life + Home Assistant). Her
+**ASTRA** minions (*Autonomous Site Task & Response Agent*) hold remote VPS/K8s sites
+over an MQTT hub. AARIA hands home/personal requests to Amelia and keeps the work desk
+(and fleet command) for herself.
 
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────┐
 │  ARIA  ·  work lane           │        │  Amelia  ·  home lane         │
 │  MXPF-AARIA-API   (port 8788) │        │  amelia-widget    (port 8787) │
-│  code · devops · servers      │        │  personal · Home Assistant    │
+│  code · devops · fleet cmd    │        │  personal · Home Assistant    │
 └──────────────┬───────────────┘        └──────────────┬───────────────┘
-               │  Cursor SDK agent                      │  Cursor SDK agent
+               │  Cursor SDK (desk)                     │  Cursor SDK
                ▼                                        ▼
         ┌─────────────────────────────────────────────────────┐
         │  Cursor platform  ·  MCP tools (memory, HA, fetch)    │
-        └─────────────────────────────────────────────────────┘
+        └──────────────────────────┬──────────────────────────┘
+                                   │ MQTT (HiveMQ default)
+                                   ▼
+                    ┌──────────────────────────┐
+                    │  ASTRA minions (remote)   │
+                    │  MXPF-ASTRA-AGENT         │
+                    └──────────────────────────┘
 ```
 
 ---
@@ -46,8 +53,9 @@ agent runtime, plus a terminal client (TUI). The goals:
 - **Temperament:** precise, calm, mission-focused; warm but not chatty.
 - **Lane:** work / professional. Delegates home + Home Assistant to Amelia.
 
-Persona is data-driven — edit `SOUL.md` (who she is) and `USER.md` (who you are). Samples
-are provided as `SOUL.sample.md` / `USER.sample.md`.
+Persona is data-driven — edit `SOUL.md` (who she is), `USER.md` (who you are), and
+`FLEET.md` (ASTRA minion roster). Samples are provided as `SOUL.sample.md` /
+`USER.sample.md` / `FLEET.sample.md`. Fleet ops skill: `skills/astra-fleet/`.
 
 ---
 
@@ -58,9 +66,10 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 | **API server** | `src/main.ts`, `src/ws.ts` | HTTP + WebSocket endpoints, warmup, stale-run cleanup |
 | **Agent** | `src/agent-manager.ts`, `src/agent.ts` | Boots the Cursor SDK agent, local store, session resume |
 | **Chat** | `src/chat.ts`, `src/stream.ts`, `src/runs.ts` | Turn handling and token streaming |
-| **Persona** | `src/persona.ts` | Loads `SOUL.md` / `USER.md` / `MEMORY.md`, working dir |
+| **Persona** | `src/persona.ts` | Loads `SOUL.md` / `USER.md` / `MEMORY.md` / `FLEET.md`, working dir |
 | **Learn loop** | `src/learn/*.ts` | Post-turn review → `MEMORY.md` / `USER.md` (Hermes-style) |
 | **Scheduler** | `src/scheduler/*.ts` | Heartbeat, interval/cron jobs, `/jobs` API |
+| **Fleet** | *(planned)* `src/fleet/*` | MQTT bridge to ASTRA minions (HiveMQ default) |
 | **MCP** | `src/config/mcp.ts` | Loads `.cursor/mcp.json` tool servers |
 | **TUI** | `src/tui/*.ts` | `aaria` terminal client (REPL, completion, auto-start) |
 | **Deploy** | `deploy/*`, `bin/aaria` | systemd unit + CLI installer |
@@ -512,7 +521,10 @@ MXPF-AARIA-API/
 ## Related projects
 
 - **Amelia** (`amelia-widget`) — the home/personal assistant + KDE plasmoid (port 8787).
+- **ASTRA** (`MXPF-ASTRA-AGENT`) — remote site minions over MQTT (HiveMQ default). Design:
+  `MXPF-ASTRA-AGENT/docs/superpowers/specs/2026-07-18-astra-design.md`.
+- **SSH-Connect** — interactive remote console MCP (complement to ASTRA).
 - **MXPF-AARIA-THEME** — design tokens for the AARIA visual identity.
 
-AARIA and Amelia are siblings: same SDK foundation, different lanes. Keep work with AARIA,
-home with Amelia.
+AARIA and Amelia are siblings: same SDK foundation, different lanes. ASTRA minions extend
+AARIA’s reach to remote assets. Keep work with AARIA, home with Amelia, sites with ASTRA.

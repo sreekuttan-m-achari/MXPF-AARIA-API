@@ -65,11 +65,33 @@ export function loadUserMarkdown(cwd: string): string | undefined {
   }
 }
 
+export function resolveFleetFilePath(cwd: string): string | undefined {
+  const override = process.env.AGENT_FLEET_PATH?.trim();
+  if (override) {
+    const p = absoluteOrCwd(cwd, override);
+    return existsSync(p) ? p : undefined;
+  }
+  const p = resolve(cwd, "FLEET.md");
+  return existsSync(p) ? p : undefined;
+}
+
+export function loadFleetMarkdown(cwd: string): string | undefined {
+  const path = resolveFleetFilePath(cwd);
+  if (!path) return undefined;
+  try {
+    const text = readFileSync(path, "utf8").trim();
+    return text.length > 0 ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function buildBootstrapUserMessage(
   persona: string,
   userContext?: string,
   memoryContext?: string,
   skillsContext?: string,
+  fleetContext?: string,
 ): string {
   const parts = [
     "The following block is your standing persona and operating instructions for this entire session.",
@@ -80,6 +102,16 @@ function buildBootstrapUserMessage(
     "",
     persona,
   ];
+  if (fleetContext?.trim()) {
+    parts.push(
+      "",
+      "---",
+      "",
+      "## Fleet (from FLEET.md) — ASTRA minions",
+      "",
+      fleetContext.trim(),
+    );
+  }
   if (memoryContext?.trim()) {
     parts.push(
       "",
@@ -166,6 +198,7 @@ export function buildGreetingPrompt(userContext?: string): string {
     "Send a brief greeting in 2–3 short sentences — FRIDAY-like: calm, capable, warm.",
     "You are ARIA (A.A.R.I.A. — Augmented Adaptive Reasoning Intelligence Assistant); 'aria' is fine informally.",
     "You handle work (DevOps, code, servers, planning); Amelia handles home and Home Assistant.",
+    "ASTRA minions hold remote sites when the fleet is configured — you are their commander.",
     "No tools. Do not mention APIs, WebSockets, ports, or technical checks.",
   ];
   if (userContext?.trim()) {
@@ -214,6 +247,8 @@ export async function bootstrapPersonaIfPresent(
   const memoryEntries = loadMemoryEntries(cwd);
   const memoryContext = formatMemoryForPrompt(memoryEntries, cwd);
   const skillsContext = formatSkillsIndex(cwd);
+  const fleetPath = resolveFleetFilePath(cwd);
+  const fleetContext = loadFleetMarkdown(cwd);
 
   if (soulOverride && !path) {
     console.error(
@@ -232,6 +267,9 @@ export async function bootstrapPersonaIfPresent(
   if (userPath && userContext) {
     console.error(`[persona] Loading ${userPath}…`);
   }
+  if (fleetPath && fleetContext) {
+    console.error(`[persona] Loading ${fleetPath}…`);
+  }
   if (memoryFileExists(cwd)) {
     console.error(`[persona] Loading ${memoryPath}…`);
   }
@@ -240,7 +278,13 @@ export async function bootstrapPersonaIfPresent(
 
   try {
     const run = await agent.send(
-      buildBootstrapUserMessage(persona, userContext, memoryContext, skillsContext),
+      buildBootstrapUserMessage(
+        persona,
+        userContext,
+        memoryContext,
+        skillsContext,
+        fleetContext,
+      ),
     );
     for await (const event of run.stream()) {
       collector.handleEvent(event);
@@ -266,10 +310,12 @@ export function personaStatus(cwd: string = agentCwd()): {
   soulPath?: string;
   userPath?: string;
   memoryPath?: string;
+  fleetPath?: string;
 } {
   return {
     soulPath: resolvePersonaFilePath(cwd),
     userPath: resolveUserFilePath(cwd),
     memoryPath: memoryFileExists(cwd) ? resolveMemoryFilePath(cwd) : undefined,
+    fleetPath: resolveFleetFilePath(cwd),
   };
 }

@@ -4,6 +4,7 @@ import { initAgent, shutdownAgent } from "./agent-manager.js";
 import { cancelStaleRuns } from "./agent-busy.js";
 import { agentCwd } from "./persona.js";
 import { logDebugStartup } from "./debug.js";
+import { startFleet, stopFleet } from "./fleet/index.js";
 import { startScheduler, stopScheduler } from "./scheduler/index.js";
 import { initTts } from "./tts.js";
 import { startServer } from "./ws.js";
@@ -19,10 +20,12 @@ if (cleared > 0) {
 }
 startWarmup(agent);
 startScheduler(agent);
+await startFleet();
 
 try {
   await startServer(agent);
 } finally {
   stopScheduler();
+  await stopFleet();
   await shutdownAgent();
 }

@@ -31,6 +31,7 @@
     "@modelcontextprotocol/server-memory": "^2026.1.26",
     "dotenv": "^16.4.5",
     "ink": "^5.2.1",
+    "mqtt": "^5.15.2",
     "node-cron": "^4.6.0",
     "react": "^18.3.1",
     "ws": "^8.18.3",

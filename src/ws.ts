@@ -23,6 +23,7 @@ import {
 import { learnReviewEnabled } from "./learn/review.js";
 import { personaStatus, userCallName } from "./persona.js";
 import { skillsStatus } from "./skills/index.js";
+import { fleetStatus, getFleetBridge } from "./fleet/index.js";
 import { cancelActiveRun } from "./runs.js";
 import {
   deliverMorningBriefIfDue,
@@ -321,6 +322,88 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && req.url === "/fleet/health") {
+        jsonResponse(res, 200, { ok: true, ...fleetStatus() });
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/fleet/agents") {
+        const bridge = getFleetBridge();
+        if (!bridge) {
+          jsonResponse(res, 200, {
+            ok: true,
+            ...fleetStatus(),
+            agents: [],
+          });
+          return;
+        }
+        const agents = await bridge.listAgents();
+        jsonResponse(res, 200, { ok: true, ...fleetStatus(), agents });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/fleet/approve") {
+        const bridge = getFleetBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "fleet disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const agentId = (body as { agentId?: string }).agentId?.trim() ?? "";
+        if (!agentId) {
+          jsonResponse(res, 400, { error: "agentId is required" });
+          return;
+        }
+        const labels = (body as { labels?: Record<string, string> }).labels;
+        const caps = (body as { caps?: string[] }).caps;
+        try {
+          const agent = await bridge.approve(agentId, labels, caps);
+          jsonResponse(res, 200, { ok: true, agent });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { ok: false, error });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/fleet/cmd") {
+        const bridge = getFleetBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "fleet disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const agentId = (body as { agentId?: string }).agentId?.trim() ?? "";
+        const action = (body as { action?: string }).action?.trim() ?? "";
+        const args = (body as { args?: Record<string, unknown> }).args ?? {};
+        if (!agentId || !action) {
+          jsonResponse(res, 400, {
+            error: "agentId and action are required",
+          });
+          return;
+        }
+        try {
+          const result = await bridge.dispatchCmd(agentId, action, args);
+          jsonResponse(res, 200, { ok: true, ...result });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 400, { ok: false, error });
+        }
+        return;
+      }
+
       if (
         (req.method === "POST" || req.method === "GET") &&
         (req.url === "/voice/warmup" || req.url?.startsWith("/voice/warmup?"))
@@ -595,6 +678,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   console.error(`[aria-server] ws://${host}:${port}`);
   console.error(`[aria-server] GET /health  GET /cursor  GET /heartbeat  GET /jobs  POST /jobs/run  POST /jobs/reload`);
   console.error(`[aria-server] GET /memory/pending  POST /memory/approve  POST /memory/reject  POST /memory/curate  GET /skills`);
+  console.error(`[aria-server] GET /fleet/health  GET /fleet/agents  POST /fleet/approve  POST /fleet/cmd`);
   console.error(`[aria-server] POST /voice/warmup  POST /voice/speak  POST /chat  POST /chat/cancel  POST /chat/stream`);
 
   await new Promise<void>((resolve) => {
