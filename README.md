@@ -80,6 +80,10 @@ Persona is data-driven — edit `SOUL.md` (who she is), `USER.md` (who you are),
 |--------|------|-------------|
 | `GET`  | `/health` | Status: name, version, session id, warm flag, greeting, persona/MCP/memory stats, scheduler summary |
 | `GET`  | `/cursor` | Cursor API config (model, masked key), account, token usage, available models |
+| `GET`  | `/fleet/health` | Fleet MQTT bridge status (`enabled`, `connected`) |
+| `GET`  | `/fleet/agents` | Pending + approved ASTRA minions |
+| `POST` | `/fleet/approve` | `{ "agentId", "labels?", "caps?" }` — approve minion |
+| `POST` | `/fleet/cmd` | `{ "agentId", "action", "args?" }` — dispatch `cmd.exec` |
 | `GET`  | `/heartbeat` | Last in-process heartbeat snapshot (RAM, load, warnings) |
 | `GET`  | `/jobs` | All configured jobs with last/next run state |
 | `POST` | `/jobs/run` | `{ "id": "heartbeat" }` — run a job immediately |
