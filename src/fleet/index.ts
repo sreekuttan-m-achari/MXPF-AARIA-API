@@ -1,22 +1,31 @@
 import { createFleetBus, type FleetBus } from "./bus.js";
-import { loadFleetMqttConfig } from "./config.js";
+import { loadFleetMqttConfig, type FleetMqttConfig } from "./config.js";
 import {
   listFleetAgentsView,
   startFleetBridge,
   type FleetBridge,
 } from "./bridge.js";
+import { buildHubView, type FleetHubView } from "./hub.js";
 
 export { listFleetAgentsView } from "./bridge.js";
+export type { FleetHubView } from "./hub.js";
 
 let bridge: FleetBridge | null = null;
 let enabled = false;
 let connected = false;
+let lastCfg: FleetMqttConfig | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-export function fleetStatus(): { enabled: boolean; connected: boolean } {
+export function fleetStatus(): {
+  enabled: boolean;
+  connected: boolean;
+  hub: FleetHubView | null;
+} {
+  const live = connected && (bridge?.bus.connected() ?? false);
   return {
     enabled,
-    connected: connected && (bridge?.bus.connected() ?? false),
+    connected: live,
+    hub: lastCfg ? buildHubView(lastCfg, bridge?.bus.stats() ?? null) : null,
   };
 }
 
@@ -30,9 +39,11 @@ async function connectOnce(): Promise<boolean> {
     enabled = false;
     connected = false;
     bridge = null;
+    lastCfg = null;
     return false;
   }
   enabled = true;
+  lastCfg = cfg;
   const bus: FleetBus = await createFleetBus(cfg);
   bridge = await startFleetBridge(bus);
   connected = true;
@@ -56,9 +67,11 @@ export async function startFleet(): Promise<void> {
     enabled = false;
     connected = false;
     bridge = null;
+    lastCfg = null;
     return;
   }
   enabled = true;
+  lastCfg = cfg;
   try {
     if (bridge) {
       try {

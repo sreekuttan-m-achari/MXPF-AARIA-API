@@ -168,10 +168,23 @@ export type FleetAgent = {
   lastResult?: Record<string, unknown>;
 };
 
+export type FleetHub = {
+  provider: string;
+  host: string;
+  username: string;
+  messagesIn: number;
+  messagesOut: number;
+  lastTrafficAt?: string;
+  lastTopic?: string;
+  subscriptions: string[];
+  connectedSince?: string;
+};
+
 export type FleetSnapshot = {
   ok: boolean;
   enabled: boolean;
   connected: boolean;
+  hub: FleetHub | null;
   agents: FleetAgent[];
 };
 

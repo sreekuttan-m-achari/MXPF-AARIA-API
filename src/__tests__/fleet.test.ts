@@ -44,6 +44,23 @@ test("loadFleetMqttConfig parses password with hash", () => {
   assert.equal(cfg!.password, "#secret");
 });
 
+test("fleet hub view strips host and tracks defaults", async () => {
+  const { buildHubView, mqttHostFromUrl } = await import("../fleet/hub.js");
+  assert.equal(
+    mqttHostFromUrl("mqtts://user:pass@broker.example:8883/path"),
+    "broker.example:8883",
+  );
+  const hub = buildHubView({
+    provider: "hivemq",
+    url: "mqtts://d5.example.hivemq.cloud:8883",
+    username: "mxpfaaria",
+    password: "x",
+  });
+  assert.equal(hub.host, "d5.example.hivemq.cloud:8883");
+  assert.equal(hub.messagesIn, 0);
+  assert.ok(hub.subscriptions.includes("mxpf/v1/agents/+/status"));
+});
+
 test("registry approve + fleet markdown", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "fleet-"));
   try {

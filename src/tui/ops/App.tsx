@@ -350,6 +350,9 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
                 fleet {fleet.connected ? "up" : fleet.enabled ? "…" : "off"} ·{" "}
                 {fleetAgents.filter((a) => a.presence === "online").length}/
                 {fleetAgents.length} online
+                {fleet.hub
+                  ? ` · ↑${fleet.hub.messagesOut} ↓${fleet.hub.messagesIn}`
+                  : ""}
               </Text>
             )}
           </Box>
@@ -420,6 +423,54 @@ function presenceColor(p: string): string {
   }
 }
 
+function HubStrip(props: {
+  fleet: FleetSnapshot;
+}): React.ReactElement {
+  const { fleet } = props;
+  const hub = fleet.hub;
+  if (!hub) {
+    return (
+      <Text dimColor>
+        hub {fleet.connected ? "connected" : "down"}
+      </Text>
+    );
+  }
+  const linkColor = fleet.connected ? "green" : "yellow";
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text>
+        <Text bold>Hub </Text>
+        <Text color="cyan">{hub.provider}</Text>
+        {" · "}
+        <Text color={linkColor} bold>
+          {fleet.connected ? "connected" : "down"}
+        </Text>
+        {" · "}
+        <Text dimColor>{hub.host}</Text>
+      </Text>
+      <Text dimColor>
+        ↓{hub.messagesIn} in · ↑{hub.messagesOut} out
+        {hub.lastTopic
+          ? ` · last ${shortTopic(hub.lastTopic)} ${fmtAgo(hub.lastTrafficAt)}`
+          : " · no traffic yet"}
+        {hub.connectedSince && fleet.connected
+          ? ` · up ${fmtAgo(hub.connectedSince)}`
+          : ""}
+      </Text>
+      <Text dimColor>
+        sub {hub.subscriptions.map(shortTopic).join(" · ") || "—"}
+      </Text>
+    </Box>
+  );
+}
+
+function shortTopic(topic: string): string {
+  if (topic.startsWith("mxpf/v1/")) {
+    return topic.slice("mxpf/v1/".length);
+  }
+  return topic.length > 42 ? `${topic.slice(0, 40)}…` : topic;
+}
+
 function FleetView(props: {
   tab: string;
   fleet: FleetSnapshot | null;
@@ -441,9 +492,7 @@ function FleetView(props: {
   if (agents.length === 0) {
     return (
       <Box flexDirection="column">
-        <Text dimColor>
-          Hub {fleet.connected ? "connected" : "connecting…"} · no minions yet
-        </Text>
+        <HubStrip fleet={fleet} />
         <Text dimColor>Waiting for ASTRA announce on MQTT…</Text>
       </Box>
     );
@@ -458,6 +507,7 @@ function FleetView(props: {
     const last = agent.lastResult;
     return (
       <Box flexDirection="column">
+        <HubStrip fleet={fleet} />
         <Text bold color="cyan">
           {agent.agentId}
         </Text>
@@ -518,9 +568,9 @@ function FleetView(props: {
 
   return (
     <Box flexDirection="column">
+      <HubStrip fleet={fleet} />
       <Text dimColor>
-        hub {fleet.connected ? "connected" : "down"} · {agents.length} minion
-        {agents.length === 1 ? "" : "s"}
+        {agents.length} minion{agents.length === 1 ? "" : "s"}
       </Text>
       {agents.map((a, i) => {
         const on = i === selected;

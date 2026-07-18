@@ -10,3 +10,5 @@ MEMORY.md
 .cursor/mcp.json
 .superpowers/
 data/
+# Host-specific / private ops skills (do not publish)
+skills/ironss-maximprof-astra-sudo/
