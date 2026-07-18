@@ -24,6 +24,11 @@ export async function resetAgentSession(): Promise<AriaAgent> {
   const cwd = agentCwd();
   if (agent) {
     try {
+      await cancelStaleRuns(agent.agentId, cwd);
+    } catch {
+      /* best-effort */
+    }
+    try {
       await agent[Symbol.asyncDispose]();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

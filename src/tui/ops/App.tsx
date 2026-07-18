@@ -549,11 +549,13 @@ function FleetView(props: {
               </Text>
               {typeof last.at === "string" ? ` · ${fmtAgo(last.at)}` : ""}
             </Text>
-            {last.data && typeof last.data === "object" && "hostname" in (last.data as object) && (
+            {last.data &&
+            typeof last.data === "object" &&
+            "hostname" in (last.data as object) ? (
               <Text dimColor>
                 host {String((last.data as { hostname?: string }).hostname)}
               </Text>
-            )}
+            ) : null}
           </Box>
         )}
         <Box marginTop={1}>
@@ -810,8 +812,56 @@ function CursorView(props: {
   if (tab === "Usage") {
     const u = cursor.usage;
     const t = u.tokens;
+    const ctx = cursor.context;
+    const memPct = ctx
+      ? Math.round(
+          (ctx.prompts.memoryChars / Math.max(1, ctx.prompts.memoryLimit)) * 100,
+        )
+      : 0;
+    const userPct = ctx
+      ? Math.round(
+          (ctx.prompts.userLearnedChars /
+            Math.max(1, ctx.prompts.userLearnedLimit)) *
+            100,
+        )
+      : 0;
     return (
       <Box flexDirection="column">
+        <Text bold>Context window</Text>
+        {ctx ? (
+          <Box flexDirection="column">
+            <Text>
+              {ctx.window.percent != null
+                ? `${ctx.window.percent}% filled`
+                : "no run yet"}
+              {ctx.window.usedTokens != null
+                ? ` · ${ctx.window.usedTokens.toLocaleString()} / ${ctx.window.limitTokens.toLocaleString()} tokens`
+                : ` · limit ${ctx.window.limitTokens.toLocaleString()} tokens`}
+            </Text>
+            <Text dimColor>
+              {gauge(ctx.window.percent ?? 0)}
+              {ctx.window.model ? ` · ${ctx.window.model}` : ""}
+            </Text>
+            <Box marginTop={1} flexDirection="column">
+              <Text bold>Standing prompts</Text>
+              <Text dimColor>
+                soul {ctx.prompts.soulChars}ch · user {ctx.prompts.userChars}ch · fleet{" "}
+                {ctx.prompts.fleetChars}ch · standing {ctx.prompts.standingChars}ch
+              </Text>
+              <Text>
+                mem {memPct}% ({ctx.prompts.memoryChars}/{ctx.prompts.memoryLimit}) ·{" "}
+                {gauge(memPct, 12)}
+              </Text>
+              <Text>
+                user-learned {userPct}% ({ctx.prompts.userLearnedChars}/
+                {ctx.prompts.userLearnedLimit}) · {gauge(userPct, 12)}
+              </Text>
+            </Box>
+          </Box>
+        ) : (
+          <Text dimColor>Context status unavailable</Text>
+        )}
+        <Box marginTop={1} flexDirection="column">
         <Text bold>Session usage</Text>
         <Text dimColor>since {fmtAgo(u.since)} · process lifetime</Text>
         <Box marginTop={1} flexDirection="column">
@@ -871,6 +921,7 @@ function CursorView(props: {
         {u.runs.total === 0 && (
           <Text dimColor>No runs yet this process — chat in light mode to accumulate usage.</Text>
         )}
+        </Box>
       </Box>
     );
   }

@@ -3,7 +3,7 @@ import http, { type IncomingMessage } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { enqueueAgentWork } from "./agent-queue.js";
-import { getAgent } from "./agent-manager.js";
+import { getAgent, resetAgentSession } from "./agent-manager.js";
 import type { AriaAgent } from "./agent.js";
 import { handleChatTurn } from "./chat.js";
 import { getMcpServerNames } from "./config/mcp.js";
@@ -21,6 +21,7 @@ import {
   rejectPending,
 } from "./learn/pending.js";
 import { learnReviewEnabled } from "./learn/review.js";
+import { buildContextStatus } from "./context-status.js";
 import { personaStatus, userCallName } from "./persona.js";
 import { skillsStatus } from "./skills/index.js";
 import { fleetStatus, getFleetBridge, listAgentsForApi } from "./fleet/index.js";
@@ -37,7 +38,7 @@ import {
   schedulerStatus,
   triggerJob,
 } from "./scheduler/index.js";
-import { getTtsEngine, speak, warmVoice } from "./tts.js";
+import { getTtsEngine, getVoiceStatus, setVoiceEnabled, speak, toggleVoice, warmVoice } from "./tts.js";
 import { buildGreetingSpeech } from "./spoken.js";
 import { getGreeting, isWarm, onGreetingReady } from "./warmup.js";
 
@@ -53,7 +54,7 @@ type Outbound =
   | { type: "brief_chunk"; text: string }
   | { type: "pong" }
   | { type: "chunk"; id: string; text: string }
-  | { type: "done"; id: string; reply: string }
+  | { type: "done"; id: string; reply: string; context?: ReturnType<typeof buildContextStatus> }
   | { type: "cancelled"; id: string; reply?: string }
   | { type: "error"; id?: string; error: string }
   | {
@@ -163,6 +164,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           memoryStats: persona.memoryPath
             ? { entries: mem.entries, chars: mem.chars, limit: mem.limit }
             : undefined,
+          context: buildContextStatus(),
           skills,
           mcp: {
             loaded: mcpServers.length > 0,
@@ -176,6 +178,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
             lastHeartbeat: jobs.lastHeartbeat,
           },
           morningBrief: brief,
+          voice: getVoiceStatus(),
         });
         return;
       }
@@ -395,6 +398,53 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && req.url === "/voice") {
+        jsonResponse(res, 200, { ok: true, ...getVoiceStatus() });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/voice") {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const raw = (body as { enabled?: unknown; action?: string }).enabled;
+        const action = (body as { action?: string }).action?.trim().toLowerCase();
+        let status;
+        if (action === "toggle" || (raw === undefined && !action)) {
+          status = toggleVoice();
+        } else if (
+          raw === true ||
+          raw === 1 ||
+          raw === "1" ||
+          raw === "on" ||
+          raw === "true" ||
+          action === "on"
+        ) {
+          status = setVoiceEnabled(true);
+        } else if (
+          raw === false ||
+          raw === 0 ||
+          raw === "0" ||
+          raw === "off" ||
+          raw === "false" ||
+          action === "off"
+        ) {
+          status = setVoiceEnabled(false);
+        } else {
+          jsonResponse(res, 400, {
+            ok: false,
+            error: "pass enabled:true|false or action:on|off|toggle",
+          });
+          return;
+        }
+        jsonResponse(res, 200, { ok: true, ...status });
+        return;
+      }
+
       if (
         (req.method === "POST" || req.method === "GET") &&
         (req.url === "/voice/warmup" || req.url?.startsWith("/voice/warmup?"))
@@ -463,6 +513,24 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         return;
       }
 
+      if (req.method === "POST" && req.url === "/session/reset") {
+        try {
+          const previousId = currentAgent().agentId;
+          const agent = await resetAgentSession();
+          jsonResponse(res, 200, {
+            ok: true,
+            previousSessionId: previousId,
+            sessionId: agent.agentId,
+            warm: isWarm(),
+            greeting: getGreeting(),
+          });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { ok: false, error });
+        }
+        return;
+      }
+
       if (req.method === "POST" && req.url === "/chat/stream") {
         let body: unknown;
         try {
@@ -491,7 +559,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
               sseWrite(res, { type: "chunk", id, text });
             }),
           );
-          sseWrite(res, { type: "done", id, reply });
+          sseWrite(res, { type: "done", id, reply, context: buildContextStatus() });
         } catch (err) {
           if (isChatCancelled(err)) {
             sseWrite(res, {
@@ -644,7 +712,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
               send(ws, { type: "chunk", id, text });
             }),
           );
-          send(ws, { type: "done", id, reply });
+          send(ws, { type: "done", id, reply, context: buildContextStatus() });
         } catch (err) {
           if (isChatCancelled(err)) {
             send(ws, {
@@ -670,7 +738,8 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   console.error(`[aria-server] GET /health  GET /cursor  GET /heartbeat  GET /jobs  POST /jobs/run  POST /jobs/reload`);
   console.error(`[aria-server] GET /memory/pending  POST /memory/approve  POST /memory/reject  POST /memory/curate  GET /skills`);
   console.error(`[aria-server] GET /fleet/health  GET /fleet/agents  POST /fleet/approve  POST /fleet/cmd`);
-  console.error(`[aria-server] POST /voice/warmup  POST /voice/speak  POST /chat  POST /chat/cancel  POST /chat/stream`);
+  console.error(`[aria-server] POST /voice/warmup  POST /voice/speak  GET|POST /voice  POST /chat  POST /chat/cancel  POST /chat/stream`);
+  console.error(`[aria-server] POST /session/reset`);
 
   await new Promise<void>((resolve) => {
     const shutdown = (): void => {

@@ -2,7 +2,7 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { ensureServerReady, fetchHealth, speakOnServer, systemdServiceName, warmVoiceEngine, type Health } from "./bootstrap.js";
+import { ensureServerReady, fetchHealth, resetSession, setVoiceMode, speakOnServer, systemdServiceName, warmVoiceEngine, type Health } from "./bootstrap.js";
 import { AriaWsClient } from "./client.js";
 import {
   completeLine,
@@ -10,6 +10,7 @@ import {
   isMemoryCommand,
   isBareSkillCommand,
   isSkillsCommand,
+  isVoiceCommand,
   looksLikeCommand,
   matchCommands,
   SLASH_COMMANDS,
@@ -531,8 +532,29 @@ async function main(): Promise<void> {
           const warm = h.warm
             ? `${c.ok}yes${c.reset}`
             : `${c.warn}no${c.reset}`;
+          const ctx = h.context;
+          let ctxLine = "";
+          if (ctx) {
+            const w =
+              ctx.window.percent != null && ctx.window.usedTokens != null
+                ? `ctx ${ctx.window.percent}% (${ctx.window.usedTokens}/${ctx.window.limitTokens})`
+                : `ctx —/${ctx.window.limitTokens}`;
+            const memPct = Math.round(
+              (ctx.prompts.memoryChars / Math.max(1, ctx.prompts.memoryLimit)) * 100,
+            );
+            const userPct = Math.round(
+              (ctx.prompts.userLearnedChars /
+                Math.max(1, ctx.prompts.userLearnedLimit)) *
+                100,
+            );
+            ctxLine = `\n${c.dim}${w} · mem ${memPct}% · user ${userPct}% · standing ${ctx.prompts.standingChars}ch${c.reset}`;
+          }
           output.write(
-            `${c.ok}${c.bold}ok${c.reset} warm=${warm} persona=${h.persona ? c.ok + "yes" : c.dim + "no"}${c.reset}${mem}${learn} mcp=${h.mcp?.loaded ? c.teal + h.mcp.servers.join(", ") : c.dim + "off"}${c.reset}\n\n`,
+            `${c.ok}${c.bold}ok${c.reset} warm=${warm} persona=${h.persona ? c.ok + "yes" : c.dim + "no"}${c.reset}${mem}${learn} mcp=${h.mcp?.loaded ? c.teal + h.mcp.servers.join(", ") : c.dim + "off"}${c.reset}${ctxLine}` +
+              (h.voice
+                ? `\n${c.dim}voice ${h.voice.enabled ? "on" : "off"} · ${h.voice.engine}${c.reset}`
+                : "") +
+              `\n\n`,
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -573,6 +595,63 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (isVoiceCommand(text)) {
+        const parts = text.trim().split(/\s+/);
+        const sub = (parts[1] ?? "toggle").toLowerCase();
+        const action =
+          sub === "on" || sub === "off" || sub === "toggle" ? sub : null;
+        if (!action) {
+          output.write(
+            `${c.warn}usage:${c.reset} ${c.cmd}/voice${c.reset} · ${c.cmd}/voice on${c.reset} · ${c.cmd}/voice off${c.reset}\n\n`,
+          );
+          prompt();
+          return;
+        }
+        try {
+          const v = await setVoiceMode(action);
+          const state = v.enabled
+            ? `${c.ok}on${c.reset}`
+            : `${c.warn}off${c.reset}`;
+          output.write(
+            `${c.dim}voice${c.reset} ${state} · engine=${v.engine} · ${c.dim}${v.source}${c.reset}\n\n`,
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          output.write(`${c.err}voice: ${msg}${c.reset}\n\n`);
+        }
+        prompt();
+        return;
+      }
+
+      if (lower === "/new" || lower === "/reset") {
+        if (streaming && currentChatId) {
+          client.cancel(currentChatId);
+          output.write(`${c.dim}cancelling current reply before reset…${c.reset}\n`);
+        }
+        output.write(`${c.dim}starting fresh session…${c.reset}\n`);
+        try {
+          const result = await resetSession();
+          const sid = result.sessionId ?? "?";
+          output.write(
+            `${c.ok}new session${c.reset} ${c.dim}${sid}${c.reset}` +
+              (result.previousSessionId
+                ? ` ${c.dim}(was ${result.previousSessionId})${c.reset}`
+                : "") +
+              `\n`,
+          );
+          if (result.greeting?.trim()) {
+            output.write(`${agentPrefix()}${result.greeting.trim()}\n\n`);
+          } else {
+            output.write(`\n`);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          output.write(`${c.err}session reset failed: ${msg}${c.reset}\n\n`);
+        }
+        prompt();
+        return;
+      }
+
       if (looksLikeCommand(text)) {
         const matches = matchCommands(text.toLowerCase());
         const suggestion =
@@ -608,12 +687,32 @@ async function main(): Promise<void> {
           onChunk: (chunk) => {
             turn.onChunk(chunk);
           },
-          onDone: (reply) => {
+          onDone: (reply, context) => {
             finishTurnWithMessage(() => {
               if (!turn.hasContent) {
                 output.write(`${agentPrefix()}${c.dim}(no reply)${c.reset}`);
               } else if (reply?.trim()) {
                 pushChatHistory("assistant", reply);
+              }
+              if (context) {
+                const w =
+                  context.window.percent != null &&
+                  context.window.usedTokens != null
+                    ? `ctx ${context.window.percent}%`
+                    : "ctx —";
+                const memPct = Math.round(
+                  (context.prompts.memoryChars /
+                    Math.max(1, context.prompts.memoryLimit)) *
+                    100,
+                );
+                const userPct = Math.round(
+                  (context.prompts.userLearnedChars /
+                    Math.max(1, context.prompts.userLearnedLimit)) *
+                    100,
+                );
+                output.write(
+                  `\n${c.dim}${w} · mem ${memPct}% · user ${userPct}%${c.reset}`,
+                );
               }
             });
           },

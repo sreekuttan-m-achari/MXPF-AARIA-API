@@ -2,6 +2,26 @@ import WebSocket from "ws";
 
 import { wsUrl } from "./config.js";
 
+export type ContextPayload = {
+  window: {
+    usedTokens: number | null;
+    limitTokens: number;
+    percent: number | null;
+    model?: string;
+  };
+  prompts: {
+    soulChars: number;
+    userChars: number;
+    userLearnedChars: number;
+    userLearnedLimit: number;
+    memoryChars: number;
+    memoryLimit: number;
+    memoryEntries: number;
+    fleetChars: number;
+    standingChars: number;
+  };
+};
+
 type Outbound =
   | { type: "ready"; greeting?: string; warm?: boolean; sessionId?: string; userName?: string; morningBrief?: "pending" | "skip" }
   | { type: "greeting"; text: string }
@@ -9,7 +29,7 @@ type Outbound =
   | { type: "brief_chunk"; text: string }
   | { type: "pong" }
   | { type: "chunk"; id: string; text: string }
-  | { type: "done"; id: string; reply: string }
+  | { type: "done"; id: string; reply: string; context?: ContextPayload }
   | { type: "cancelled"; id: string; reply?: string }
   | { type: "error"; id?: string; error: string }
   | {
@@ -29,7 +49,7 @@ export type LearnedEvent = Extract<Outbound, { type: "learned" }>;
 
 export type ChatHandlers = {
   onChunk: (text: string) => void;
-  onDone: (reply: string) => void;
+  onDone: (reply: string, context?: ContextPayload) => void;
   onCancelled: (partial?: string) => void;
   onError: (message: string) => void;
 };
@@ -105,7 +125,7 @@ export class AriaWsClient {
         }
 
         if (msg.type === "done" && this.activeHandlers) {
-          this.activeHandlers.onDone(msg.reply);
+          this.activeHandlers.onDone(msg.reply, msg.context);
           this.activeHandlers = undefined;
           return;
         }

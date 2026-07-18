@@ -7,7 +7,7 @@ import type {
 } from "@cursor/sdk";
 
 import type { AriaAgent } from "./agent.js";
-import { withAgentBusyRecovery } from "./agent-busy.js";
+import { withAgentBusyRecovery, isAgentBusyError } from "./agent-busy.js";
 import { ChatCancelledError } from "./errors.js";
 import {
   registerActiveRun,
@@ -130,12 +130,17 @@ function describeRunFailure(
 }
 
 export function isRecoverableRunError(err: unknown): boolean {
+  if (isAgentBusyError(err)) {
+    return true;
+  }
   if (!(err instanceof Error)) {
     return false;
   }
   const message = err.message.toLowerCase();
   return (
     message.includes("agent run failed") ||
+    message.includes("already has active run") ||
+    message.includes("agent busy after recovery") ||
     message.includes("network request failed") ||
     message.includes("network error") ||
     message.includes("service unavailable")

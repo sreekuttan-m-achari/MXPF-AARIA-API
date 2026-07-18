@@ -30,6 +30,8 @@ let warmupPromise: Promise<{ ok: boolean; engine: TtsEngine; ms: number }> | nul
   null;
 let lastWarmAt = 0;
 let cachedChimePath: string | null = null;
+/** Runtime mute override; null = follow AARIA_VOICE env / default. */
+let runtimeVoiceOverride: boolean | null = null;
 
 
 function which(bin: string): string | null {
@@ -47,7 +49,7 @@ function which(bin: string): string | null {
   return null;
 }
 
-function voiceEnabled(): boolean {
+function voiceEnabledFromEnv(): boolean {
   const raw = process.env.AARIA_VOICE?.trim();
   if (raw === "0" || raw?.toLowerCase() === "false" || raw?.toLowerCase() === "off") {
     return false;
@@ -57,6 +59,59 @@ function voiceEnabled(): boolean {
   }
   // Default: on when a backend exists (decided at probe time)
   return true;
+}
+
+/** Effective voice preference (runtime toggle wins over env). */
+export function isVoiceEnabled(): boolean {
+  if (runtimeVoiceOverride !== null) return runtimeVoiceOverride;
+  return voiceEnabledFromEnv();
+}
+
+export type VoiceStatus = {
+  enabled: boolean;
+  engine: TtsEngine;
+  source: "runtime" | "env" | "default";
+};
+
+export function getVoiceStatus(): VoiceStatus {
+  const enabled = isVoiceEnabled();
+  let source: VoiceStatus["source"] = "default";
+  if (runtimeVoiceOverride !== null) {
+    source = "runtime";
+  } else {
+    const raw = process.env.AARIA_VOICE?.trim();
+    if (raw) source = "env";
+  }
+  return {
+    enabled,
+    engine: enabled ? getTtsEngine() : "off",
+    source,
+  };
+}
+
+/** Toggle or set spoken replies on/off without restarting the API. */
+export function setVoiceEnabled(on: boolean): VoiceStatus {
+  runtimeVoiceOverride = on;
+  if (!on) {
+    stopSpeech();
+    console.error("[aria-voice] muted (runtime)");
+  } else {
+    // Re-probe if we started muted or previously marked off
+    if (!probe || probe.engine === "off") {
+      probe = null;
+      initTts();
+    }
+    console.error(`[aria-voice] unmuted (runtime) engine=${getTtsEngine()}`);
+  }
+  return getVoiceStatus();
+}
+
+export function toggleVoice(): VoiceStatus {
+  return setVoiceEnabled(!isVoiceEnabled());
+}
+
+function voiceEnabled(): boolean {
+  return isVoiceEnabled();
 }
 
 function preferredEngine(): "auto" | "piper" | "spd-say" {
@@ -532,6 +587,7 @@ function speakPiper(text: string, model: string, playerBin: string): void {
  * Replaces any currently playing utterance.
  */
 export function speak(text: string): void {
+  if (!isVoiceEnabled()) return;
   const engine = getTtsEngine();
   if (engine === "off") return;
   const line = applySpeechPronunciations(text.trim());
@@ -642,6 +698,7 @@ export function playDoneChime(): void {
 
 /** Short note for the agent persona about current voice setup. */
 export function voiceCapabilitySummary(): string | undefined {
+  if (!isVoiceEnabled()) return undefined;
   const engine = getTtsEngine();
   if (engine === "off") return undefined;
   const model =
@@ -663,4 +720,5 @@ export function voiceCapabilitySummary(): string | undefined {
 export function _resetTtsProbeForTests(): void {
   stopSpeech();
   probe = null;
+  runtimeVoiceOverride = null;
 }

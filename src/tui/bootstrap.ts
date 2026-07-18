@@ -15,6 +15,26 @@ export type Health = {
   user?: string;
   learn?: { review: boolean };
   memoryStats?: { entries: number; chars: number; limit: number };
+  context?: {
+    window: {
+      usedTokens: number | null;
+      limitTokens: number;
+      percent: number | null;
+      model?: string;
+    };
+    prompts: {
+      soulChars: number;
+      userChars: number;
+      userLearnedChars: number;
+      userLearnedLimit: number;
+      memoryChars: number;
+      memoryLimit: number;
+      memoryEntries: number;
+      fleetChars: number;
+      standingChars: number;
+    };
+  };
+  voice?: { enabled: boolean; engine: string; source: string };
   mcp?: { loaded: boolean; servers: string[] };
 };
 
@@ -31,6 +51,63 @@ export async function fetchHealth(): Promise<Health> {
     throw new Error(`/health returned ${res.status}`);
   }
   return (await res.json()) as Health;
+}
+
+export type SessionResetResult = {
+  ok: boolean;
+  previousSessionId?: string;
+  sessionId?: string;
+  warm?: boolean;
+  greeting?: string;
+  error?: string;
+};
+
+/** Dispose the stuck Cursor session and create a fresh one (server-side). */
+export async function resetSession(): Promise<SessionResetResult> {
+  const res = await fetch(`${apiBase()}/session/reset`, {
+    method: "POST",
+    signal: AbortSignal.timeout(90_000),
+  });
+  const body = (await res.json()) as SessionResetResult;
+  if (!res.ok || !body.ok) {
+    throw new Error(body.error ?? `/session/reset returned ${res.status}`);
+  }
+  return body;
+}
+
+export type VoiceStatusResult = {
+  ok: boolean;
+  enabled: boolean;
+  engine: string;
+  source: string;
+  error?: string;
+};
+
+export async function fetchVoiceStatus(): Promise<VoiceStatusResult> {
+  const res = await fetch(`${apiBase()}/voice`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  const body = (await res.json()) as VoiceStatusResult;
+  if (!res.ok || body.error) {
+    throw new Error(body.error ?? `/voice returned ${res.status}`);
+  }
+  return body;
+}
+
+export async function setVoiceMode(
+  action: "on" | "off" | "toggle",
+): Promise<VoiceStatusResult> {
+  const res = await fetch(`${apiBase()}/voice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const body = (await res.json()) as VoiceStatusResult;
+  if (!res.ok || body.error) {
+    throw new Error(body.error ?? `/voice returned ${res.status}`);
+  }
+  return body;
 }
 
 /** Speak text on the API host (fire-and-forget from the TUI). */

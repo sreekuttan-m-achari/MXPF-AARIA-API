@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { Cursor } from "@cursor/sdk";
 
+import { buildContextStatus } from "./context-status.js";
 import { resolveModelId } from "./config/model.js";
 import { agentCwd } from "./persona.js";
 import { getUsageSnapshot } from "./usage.js";
@@ -136,6 +137,7 @@ export async function buildCursorStatus(sessionId?: string): Promise<{
   accountError?: string;
   models: ModelsCache | null;
   usage: ReturnType<typeof getUsageSnapshot>;
+  context: ReturnType<typeof buildContextStatus>;
 }> {
   const key = process.env.CURSOR_API_KEY?.trim();
   const masked = maskApiKey(key);
@@ -158,5 +160,6 @@ export async function buildCursorStatus(sessionId?: string): Promise<{
     accountError: accountResult.ok ? undefined : accountResult.error,
     models,
     usage: getUsageSnapshot(),
+    context: buildContextStatus(),
   };
 }

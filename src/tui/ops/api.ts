@@ -139,6 +139,25 @@ export type CursorStatus = {
       durationMs?: number;
     }>;
   };
+  context: {
+    window: {
+      usedTokens: number | null;
+      limitTokens: number;
+      percent: number | null;
+      model?: string;
+    };
+    prompts: {
+      soulChars: number;
+      userChars: number;
+      userLearnedChars: number;
+      userLearnedLimit: number;
+      memoryChars: number;
+      memoryLimit: number;
+      memoryEntries: number;
+      fleetChars: number;
+      standingChars: number;
+    };
+  };
 };
 
 export async function fetchCursorStatus(): Promise<CursorStatus> {

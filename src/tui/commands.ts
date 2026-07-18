@@ -12,6 +12,15 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/skills", summary: "List installed skills" },
   { name: "/skill", summary: "Load a skill for the next turn (/skill <name> [prompt])" },
   { name: "/cancel", summary: "Cancel the current reply" },
+  {
+    name: "/voice",
+    summary: "Voice on/off (/voice · /voice on · /voice off)",
+  },
+  {
+    name: "/new",
+    aliases: ["/reset"],
+    summary: "Start a fresh Cursor session (unstick a frozen agent)",
+  },
   { name: "/quit", aliases: ["/exit"], summary: "Exit (also /exit, Ctrl+D)" },
 ];
 
@@ -78,11 +87,18 @@ export function isSkillCommand(text: string): boolean {
   return /^\/skill\s+\S+/i.test(text.trim());
 }
 
+export function isVoiceCommand(text: string): boolean {
+  return /^\/voice(?:\s+\S+)?$/i.test(text.trim());
+}
+
 const EXACT_COMMANDS = new Set([
   "/help",
   "/health",
   "/ops",
   "/cancel",
+  "/voice",
+  "/new",
+  "/reset",
   "/quit",
   "/exit",
 ]);
@@ -104,6 +120,9 @@ export function isBuiltinCommand(text: string): boolean {
     return true;
   }
   if (isBareSkillCommand(trimmed)) {
+    return true;
+  }
+  if (isVoiceCommand(trimmed)) {
     return true;
   }
   return looksLikeCommand(trimmed);
