@@ -574,11 +574,12 @@ function FleetView(props: {
       </Text>
       {agents.map((a, i) => {
         const on = i === selected;
+        const label = (a.name?.trim() || a.agentId).padEnd(22).slice(0, 22);
         return (
           <Text key={a.agentId} inverse={on}>
             {on ? "› " : "  "}
             <Text color={presenceColor(a.presence)}>{a.presence.padEnd(8)}</Text>
-            <Text bold>{a.agentId.padEnd(22)}</Text>
+            <Text bold>{label}</Text>
             <Text dimColor>{a.task.slice(0, 36)}</Text>
           </Text>
         );

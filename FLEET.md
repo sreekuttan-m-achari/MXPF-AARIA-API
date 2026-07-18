@@ -18,6 +18,7 @@ Live roster and operating notes for **A.S.T.R.A.** minions
 |----------|------|-------------|--------|------|--------|
 | astra-demo | demo | pop-os | env=lab | health, exec | approved |
 | astra-vmi548194 | astra-ironssvm | vmi548194.contaboserver.net | env=prod, role=vps, host=vmi548194 | health, exec | approved |
+| astra-ip-172-26-12-196 | astra-dr-n-me-vps | ip-172-26-12-196 | env=prod, role=vps, cloud=aws, site=drandme | health, exec | approved |
 <!-- FLEET:END -->
 
 ## How AARIA should use the fleet
