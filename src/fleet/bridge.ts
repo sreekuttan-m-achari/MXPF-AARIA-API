@@ -14,7 +14,7 @@ import {
   upsertPending,
   type AgentRecord,
 } from "./registry-store.js";
-import { currentTaskLabel, fleetPresence } from "./presence.js";
+import { currentTaskLabel, fleetPresence, resolveLastSeen } from "./presence.js";
 import { topics } from "./topics.js";
 import type { FleetBus } from "./bus.js";
 
@@ -24,9 +24,11 @@ export type FleetAgentView = AgentRecord & {
 };
 
 export function toFleetAgentView(agent: AgentRecord): FleetAgentView {
+  const lastSeenAt = resolveLastSeen(agent) ?? agent.lastSeenAt;
   return {
     ...agent,
-    presence: fleetPresence(agent.status, agent.lastSeenAt),
+    lastSeenAt,
+    presence: fleetPresence(agent.status, lastSeenAt),
     task: currentTaskLabel(agent),
   };
 }

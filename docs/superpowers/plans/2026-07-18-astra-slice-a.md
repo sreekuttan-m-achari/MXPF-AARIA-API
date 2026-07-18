@@ -18,7 +18,7 @@
 - Core caps only: `health`, sandboxed `exec` (cwd + timeout + max output); no docker/nginx/k8s packs yet
 - Result log bodies capped at 64 KiB
 - QoS 1 for registry / cmd / result
-- HiveMQ free tier cannot mint MQTT users via API — registration **approves identity + caps**; MQTT username/password are pre-provisioned (e.g. `mxpfaastra`)
+- HiveMQ free tier cannot mint MQTT users via API — registration **approves identity + caps**; MQTT username/password are pre-provisioned (e.g. `mxpfastra`)
 - Keep files small and single-purpose; match AARIA style (`src/*.ts`, `.js` import suffixes)
 
 ## File map
@@ -290,7 +290,7 @@ test("parses hive mqtt url and quoted password", () => {
   const cfg = parseConfig({
     ASTRA_MQTT_PROVIDER: "hivemq",
     ASTRA_MQTT_URL: "mqtts://example.hivemq.cloud:8883",
-    ASTRA_MQTT_USERNAME: "mxpfaastra",
+    ASTRA_MQTT_USERNAME: "mxpfastra",
     ASTRA_MQTT_PASSWORD: "#secret",
     ASTRA_AGENT_ID: "astra-web-prod",
     ASTRA_AGENT_NAME: "web-prod",
@@ -522,7 +522,7 @@ Bridge behaviour:
 
 - [ ] **Step 1: E2E checklist (manual)**
 
-1. Ensure HiveMQ users `mxpfaaria` / `mxpfaastra` exist (Publish and Subscribe)
+1. Ensure HiveMQ users `mxpfaaria` / `mxpfastra` exist (Publish and Subscribe)
 2. Start AARIA (`npm start`) — log `[fleet] connected`
 3. Start ASTRA with `ASTRA_AGENT_ID=astra-demo` — log `announced`
 4. `curl -s http://127.0.0.1:8788/fleet/agents` — see pending `astra-demo`

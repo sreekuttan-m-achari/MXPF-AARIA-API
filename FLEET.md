@@ -16,7 +16,8 @@ Live roster and operating notes for **A.S.T.R.A.** minions
 <!-- FLEET:BEGIN -->
 | Agent ID | Name | Host / site | Labels | Caps | Status |
 |----------|------|-------------|--------|------|--------|
-| *(none approved yet)* | | | | | pending first registration |
+| astra-demo | demo | pop-os | env=lab | health, exec | approved |
+| astra-vmi548194 | astra-ironssvm | vmi548194.contaboserver.net | env=prod, role=vps, host=vmi548194 | health, exec | approved |
 <!-- FLEET:END -->
 
 ## How AARIA should use the fleet

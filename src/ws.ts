@@ -23,7 +23,7 @@ import {
 import { learnReviewEnabled } from "./learn/review.js";
 import { personaStatus, userCallName } from "./persona.js";
 import { skillsStatus } from "./skills/index.js";
-import { fleetStatus, getFleetBridge } from "./fleet/index.js";
+import { fleetStatus, getFleetBridge, listAgentsForApi } from "./fleet/index.js";
 import { cancelActiveRun } from "./runs.js";
 import {
   deliverMorningBriefIfDue,
@@ -328,16 +328,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
       }
 
       if (req.method === "GET" && req.url === "/fleet/agents") {
-        const bridge = getFleetBridge();
-        if (!bridge) {
-          jsonResponse(res, 200, {
-            ok: true,
-            ...fleetStatus(),
-            agents: [],
-          });
-          return;
-        }
-        const agents = await bridge.listAgents();
+        const agents = await listAgentsForApi();
         jsonResponse(res, 200, { ok: true, ...fleetStatus(), agents });
         return;
       }

@@ -17,6 +17,25 @@ export function fleetPresence(
   return "offline";
 }
 
+/** Best-effort last-seen from store fields (heartbeat / result / announce). */
+export function resolveLastSeen(agent: {
+  lastSeenAt?: string;
+  lastAnnounceAt?: string;
+  lastStatus?: Record<string, unknown>;
+  lastResult?: Record<string, unknown>;
+}): string | undefined {
+  const candidates = [
+    agent.lastSeenAt,
+    typeof agent.lastStatus?.at === "string" ? agent.lastStatus.at : undefined,
+    typeof agent.lastResult?.at === "string" ? agent.lastResult.at : undefined,
+    agent.lastAnnounceAt,
+  ].filter((x): x is string => typeof x === "string" && x.length > 0);
+  if (candidates.length === 0) return undefined;
+  return candidates.reduce((a, b) =>
+    Date.parse(a) >= Date.parse(b) ? a : b,
+  );
+}
+
 export function currentTaskLabel(agent: {
   currentJob?: {
     action: string;
