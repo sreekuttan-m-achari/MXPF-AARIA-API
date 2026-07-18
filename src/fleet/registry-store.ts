@@ -4,6 +4,16 @@ import { z } from "zod";
 
 import { agentCwd } from "../persona.js";
 
+const CurrentJobSchema = z
+  .object({
+    jobId: z.string().min(1),
+    action: z.string().min(1),
+    summary: z.string().optional(),
+    dispatchedAt: z.string().min(1),
+  })
+  .nullable()
+  .optional();
+
 const AgentRecordSchema = z.object({
   agentId: z.string().min(1),
   name: z.string().optional(),
@@ -13,8 +23,10 @@ const AgentRecordSchema = z.object({
   status: z.enum(["pending", "approved", "rejected"]),
   lastAnnounceAt: z.string().optional(),
   approvedAt: z.string().optional(),
+  lastSeenAt: z.string().optional(),
   lastStatus: z.record(z.string(), z.unknown()).optional(),
   lastResult: z.record(z.string(), z.unknown()).optional(),
+  currentJob: CurrentJobSchema,
 });
 
 export type AgentRecord = z.infer<typeof AgentRecordSchema>;
@@ -82,9 +94,11 @@ export async function upsertPending(
     caps: input.caps ?? existing?.caps ?? [],
     status: existing?.status === "approved" ? "approved" : "pending",
     lastAnnounceAt: new Date().toISOString(),
+    lastSeenAt: new Date().toISOString(),
     approvedAt: existing?.approvedAt,
     lastStatus: existing?.lastStatus,
     lastResult: existing?.lastResult,
+    currentJob: existing?.currentJob ?? null,
   };
   store.agents[input.agentId] = AgentRecordSchema.parse(record);
   await writeStore(store, cwd);
@@ -126,6 +140,7 @@ export async function recordAgentStatus(
   const existing = store.agents[agentId];
   if (!existing) return;
   existing.lastStatus = status;
+  existing.lastSeenAt = new Date().toISOString();
   store.agents[agentId] = existing;
   await writeStore(store, cwd);
 }
@@ -139,6 +154,36 @@ export async function recordAgentResult(
   const existing = store.agents[agentId];
   if (!existing) return;
   existing.lastResult = result;
+  existing.lastSeenAt = new Date().toISOString();
+  const jobId = typeof result.jobId === "string" ? result.jobId : undefined;
+  if (
+    existing.currentJob &&
+    (!jobId || existing.currentJob.jobId === jobId)
+  ) {
+    existing.currentJob = null;
+  }
+  store.agents[agentId] = existing;
+  await writeStore(store, cwd);
+}
+
+export async function setCurrentJob(
+  agentId: string,
+  job: {
+    jobId: string;
+    action: string;
+    summary?: string;
+  },
+  cwd?: string,
+): Promise<void> {
+  const store = await readStore(cwd);
+  const existing = store.agents[agentId];
+  if (!existing) return;
+  existing.currentJob = {
+    jobId: job.jobId,
+    action: job.action,
+    summary: job.summary,
+    dispatchedAt: new Date().toISOString(),
+  };
   store.agents[agentId] = existing;
   await writeStore(store, cwd);
 }

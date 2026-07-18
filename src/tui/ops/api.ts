@@ -145,6 +145,56 @@ export async function fetchCursorStatus(): Promise<CursorStatus> {
   return getJson<CursorStatus>("/cursor");
 }
 
+export type FleetPresence = "online" | "idle" | "offline" | "pending";
+
+export type FleetAgent = {
+  agentId: string;
+  name?: string;
+  hostname?: string;
+  labels: Record<string, string>;
+  caps: string[];
+  status: string;
+  presence: FleetPresence;
+  task: string;
+  lastSeenAt?: string;
+  lastAnnounceAt?: string;
+  approvedAt?: string;
+  currentJob?: {
+    jobId: string;
+    action: string;
+    summary?: string;
+    dispatchedAt: string;
+  } | null;
+  lastResult?: Record<string, unknown>;
+};
+
+export type FleetSnapshot = {
+  ok: boolean;
+  enabled: boolean;
+  connected: boolean;
+  agents: FleetAgent[];
+};
+
+export async function fetchFleet(): Promise<FleetSnapshot> {
+  return getJson<FleetSnapshot>("/fleet/agents");
+}
+
+export async function approveFleetAgent(
+  agentId: string,
+  labels?: Record<string, string>,
+  caps?: string[],
+): Promise<void> {
+  await postJson("/fleet/approve", { agentId, labels, caps });
+}
+
+export async function fleetCmd(
+  agentId: string,
+  action: string,
+  args?: Record<string, unknown>,
+): Promise<{ jobId: string }> {
+  return postJson<{ jobId: string }>("/fleet/cmd", { agentId, action, args });
+}
+
 export function opsEnabled(): boolean {
   const raw = process.env.AARIA_OPS?.trim().toLowerCase();
   if (raw === "0" || raw === "false" || raw === "off" || raw === "no") {

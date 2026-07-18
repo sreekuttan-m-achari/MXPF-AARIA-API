@@ -37,7 +37,7 @@ ${commandHelpLines()}
 
 ${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for command suggestions · Tab to complete.
 Paste multiple lines as one message · end a line with \\ to continue on the next.
-${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable).
+${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (Fleet · Health · Jobs…) — set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable.
 Talk naturally for work tasks — code, DevOps, servers, planning.
 ${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 

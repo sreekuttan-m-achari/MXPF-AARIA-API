@@ -10,15 +10,35 @@ import {
   listAgents,
   recordAgentResult,
   recordAgentStatus,
+  setCurrentJob,
   upsertPending,
   type AgentRecord,
 } from "./registry-store.js";
+import { currentTaskLabel, fleetPresence } from "./presence.js";
 import { topics } from "./topics.js";
 import type { FleetBus } from "./bus.js";
 
+export type FleetAgentView = AgentRecord & {
+  presence: ReturnType<typeof fleetPresence>;
+  task: string;
+};
+
+export function toFleetAgentView(agent: AgentRecord): FleetAgentView {
+  return {
+    ...agent,
+    presence: fleetPresence(agent.status, agent.lastSeenAt),
+    task: currentTaskLabel(agent),
+  };
+}
+
+export async function listFleetAgentsView(): Promise<FleetAgentView[]> {
+  const agents = await listAgents();
+  return agents.map(toFleetAgentView);
+}
+
 export type FleetBridge = {
   bus: FleetBus;
-  listAgents: () => Promise<AgentRecord[]>;
+  listAgents: () => Promise<FleetAgentView[]>;
   approve: (
     agentId: string,
     labels?: Record<string, string>,
@@ -107,7 +127,7 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
 
   return {
     bus,
-    listAgents,
+    listAgents: listFleetAgentsView,
     async approve(agentId, labels, caps) {
       const record = await approveAgent(
         agentId,
@@ -131,6 +151,11 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
         throw new Error(`agent not approved: ${agentId}`);
       }
       const jobId = crypto.randomUUID();
+      const summary =
+        action === "exec" && typeof args.cmd === "string"
+          ? String(args.cmd).slice(0, 80)
+          : undefined;
+      await setCurrentJob(agentId, { jobId, action, summary });
       const env = makeEnvelope(
         "cmd.exec",
         agentId,

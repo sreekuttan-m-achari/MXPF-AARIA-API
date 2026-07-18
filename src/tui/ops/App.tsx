@@ -3,15 +3,20 @@ import { Box, Text, useApp, useInput } from "ink";
 
 import type { Health } from "../bootstrap.js";
 import {
+  approveFleetAgent,
   approvePending,
   fetchCursorStatus,
+  fetchFleet,
   fetchHeartbeat,
   fetchJobs,
   fetchOpsHealth,
   fetchPending,
+  fleetCmd,
   rejectPending,
   runJob,
   type CursorStatus,
+  type FleetAgent,
+  type FleetSnapshot,
   type HeartbeatSnapshot,
   type JobState,
   type PendingEntry,
@@ -19,15 +24,16 @@ import {
 import { listChatHistory, type ChatHistoryEntry } from "./history.js";
 import { ringPush, sparkline } from "./sparkline.js";
 
-type Panel = "health" | "jobs" | "memory" | "chat" | "cursor";
+type Panel = "health" | "jobs" | "memory" | "chat" | "cursor" | "fleet";
 
-const PANELS: Panel[] = ["health", "jobs", "memory", "chat", "cursor"];
+const PANELS: Panel[] = ["health", "jobs", "memory", "chat", "cursor", "fleet"];
 const PANEL_LABEL: Record<Panel, string> = {
   health: "Health",
   jobs: "Jobs",
   memory: "Memory",
   chat: "Chat",
   cursor: "Cursor",
+  fleet: "Fleet",
 };
 
 const TABS: Record<Panel, string[]> = {
@@ -36,6 +42,7 @@ const TABS: Record<Panel, string[]> = {
   memory: ["Pending", "Help"],
   chat: ["Preview"],
   cursor: ["Config", "Usage", "Account"],
+  fleet: ["Overview", "Detail"],
 };
 
 function gauge(pct: number, width = 20): string {
@@ -92,12 +99,14 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
   const [pending, setPending] = useState<PendingEntry[]>([]);
   const [chat, setChat] = useState<ChatHistoryEntry[]>(() => listChatHistory());
   const [cursor, setCursor] = useState<CursorStatus | null>(null);
+  const [fleet, setFleet] = useState<FleetSnapshot | null>(null);
   const [memSeries, setMemSeries] = useState<number[]>([]);
   const [loadSeries, setLoadSeries] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
 
   const tabs = TABS[panel];
   const tabIdxClamped = Math.min(tabIdx, tabs.length - 1);
+  const fleetAgents = fleet?.agents ?? [];
 
   const listLen = useMemo(() => {
     switch (panel) {
@@ -107,25 +116,29 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
         return Math.max(1, pending.length);
       case "chat":
         return Math.max(1, chat.length);
+      case "fleet":
+        return Math.max(1, fleetAgents.length);
       default:
         return 1;
     }
-  }, [panel, jobs.length, pending.length, chat.length]);
+  }, [panel, jobs.length, pending.length, chat.length, fleetAgents.length]);
 
   const refresh = useCallback(async () => {
     try {
-      const [h, snapshot, j, p, cur] = await Promise.all([
+      const [h, snapshot, j, p, cur, fl] = await Promise.all([
         fetchOpsHealth(),
         fetchHeartbeat(),
         fetchJobs(),
         fetchPending(),
         fetchCursorStatus(),
+        fetchFleet().catch(() => null),
       ]);
       setHealth(h);
       setHb(snapshot);
       setJobs(j);
       setPending(p);
       setCursor(cur);
+      setFleet(fl);
       setChat(listChatHistory());
       if (snapshot) {
         setMemSeries((prev) => {
@@ -163,7 +176,7 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
   }, [listLen]);
 
   const doAction = useCallback(
-    async (action: "run" | "approve" | "reject") => {
+    async (action: "run" | "approve" | "reject" | "fleet-approve" | "fleet-health") => {
       if (busy) {
         return;
       }
@@ -192,6 +205,19 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
           await approvePending("all");
           setStatus("approved all");
           await refresh();
+        } else if (panel === "fleet" && fleetAgents[listIdx]) {
+          const agent = fleetAgents[listIdx]!;
+          if (action === "fleet-approve") {
+            setStatus(`approving ${agent.agentId}…`);
+            await approveFleetAgent(agent.agentId, agent.labels, agent.caps.length ? agent.caps : ["health", "exec"]);
+            setStatus(`approved ${agent.agentId}`);
+            await refresh();
+          } else if (action === "fleet-health") {
+            setStatus(`health → ${agent.agentId}…`);
+            const { jobId } = await fleetCmd(agent.agentId, "health", {});
+            setStatus(`health job ${jobId.slice(0, 8)}…`);
+            await refresh();
+          }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -200,7 +226,7 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
         setBusy(false);
       }
     },
-    [busy, panel, jobs, pending, listIdx, refresh],
+    [busy, panel, jobs, pending, listIdx, refresh, fleetAgents],
   );
 
   useInput((input, key) => {
@@ -232,6 +258,10 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
       setPanel("cursor");
       return;
     }
+    if (input === "6") {
+      setPanel("fleet");
+      return;
+    }
     if (key.leftArrow || input === "[") {
       setTabIdx((i) => (i - 1 + tabs.length) % tabs.length);
       return;
@@ -260,6 +290,14 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
       void doAction("reject");
       return;
     }
+    if (input === "a" && panel === "fleet") {
+      void doAction("fleet-approve");
+      return;
+    }
+    if (input === "h" && panel === "fleet") {
+      void doAction("fleet-health");
+      return;
+    }
     if (key.tab) {
       const idx = PANELS.indexOf(panel);
       const delta = key.shift ? -1 : 1;
@@ -268,12 +306,15 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
   });
 
   const hints = useMemo(() => {
-    const base = "1-5 panels · ←/→ tabs · ↑/↓ list · q exit";
+    const base = "1-6 panels · ←/→ tabs · ↑/↓ list · q exit";
     if (panel === "jobs") {
       return `${base} · r run job`;
     }
     if (panel === "memory") {
       return `${base} · a approve · x reject`;
+    }
+    if (panel === "fleet") {
+      return `${base} · a approve · h health`;
     }
     return base;
   }, [panel]);
@@ -304,6 +345,13 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
             <Text color={health?.ok ? "green" : "yellow"}>
               {health?.ok ? "api ok" : "api ?"} · {health?.warm ? "warm" : "cold"}
             </Text>
+            {fleet && (
+              <Text dimColor>
+                fleet {fleet.connected ? "up" : fleet.enabled ? "…" : "off"} ·{" "}
+                {fleetAgents.filter((a) => a.presence === "online").length}/
+                {fleetAgents.length} online
+              </Text>
+            )}
           </Box>
         </Box>
 
@@ -339,6 +387,14 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
             {panel === "cursor" && (
               <CursorView tab={tabs[tabIdxClamped]!} cursor={cursor} />
             )}
+            {panel === "fleet" && (
+              <FleetView
+                tab={tabs[tabIdxClamped]!}
+                fleet={fleet}
+                agents={fleetAgents}
+                selected={listIdx}
+              />
+            )}
           </Box>
         </Box>
       </Box>
@@ -347,6 +403,136 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
         <Text dimColor>{hints}</Text>
         <Text dimColor>{status}</Text>
       </Box>
+    </Box>
+  );
+}
+
+function presenceColor(p: string): string {
+  switch (p) {
+    case "online":
+      return "green";
+    case "idle":
+      return "yellow";
+    case "pending":
+      return "cyan";
+    default:
+      return "red";
+  }
+}
+
+function FleetView(props: {
+  tab: string;
+  fleet: FleetSnapshot | null;
+  agents: FleetAgent[];
+  selected: number;
+}): React.ReactElement {
+  const { tab, fleet, agents, selected } = props;
+  if (!fleet) {
+    return <Text dimColor>Fleet bridge offline or loading…</Text>;
+  }
+  if (!fleet.enabled) {
+    return (
+      <Box flexDirection="column">
+        <Text color="yellow">Fleet MQTT disabled</Text>
+        <Text dimColor>Set AARIA_MQTT_URL in .env to enable ASTRA minions.</Text>
+      </Box>
+    );
+  }
+  if (agents.length === 0) {
+    return (
+      <Box flexDirection="column">
+        <Text dimColor>
+          Hub {fleet.connected ? "connected" : "connecting…"} · no minions yet
+        </Text>
+        <Text dimColor>Waiting for ASTRA announce on MQTT…</Text>
+      </Box>
+    );
+  }
+
+  const agent = agents[Math.min(selected, agents.length - 1)]!;
+
+  if (tab === "Detail") {
+    const labels = Object.entries(agent.labels)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(" · ");
+    const last = agent.lastResult;
+    return (
+      <Box flexDirection="column">
+        <Text bold color="cyan">
+          {agent.agentId}
+        </Text>
+        <Text>
+          presence{" "}
+          <Text color={presenceColor(agent.presence)} bold>
+            {agent.presence}
+          </Text>
+          {" · registry "}
+          {agent.status}
+        </Text>
+        <Text dimColor>
+          {agent.name ?? "—"}
+          {agent.hostname ? ` · ${agent.hostname}` : ""}
+        </Text>
+        <Text dimColor>seen {fmtAgo(agent.lastSeenAt)} · approved {fmtAgo(agent.approvedAt)}</Text>
+        {labels ? <Text dimColor>{labels}</Text> : null}
+        <Text>
+          <Text bold>caps </Text>
+          {agent.caps.join(", ") || "—"}
+        </Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text bold>Current / last task</Text>
+          <Text color={agent.currentJob ? "yellow" : undefined}>{agent.task}</Text>
+          {agent.currentJob && (
+            <Text dimColor>
+              job {agent.currentJob.jobId.slice(0, 12)}… · since{" "}
+              {fmtAgo(agent.currentJob.dispatchedAt)}
+            </Text>
+          )}
+        </Box>
+        {last && (
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>Last result</Text>
+            <Text>
+              {String(last.action ?? "?")} ·{" "}
+              <Text color={last.ok === true ? "green" : last.ok === false ? "red" : "gray"}>
+                {String(last.ok)}
+              </Text>
+              {typeof last.at === "string" ? ` · ${fmtAgo(last.at)}` : ""}
+            </Text>
+            {last.data && typeof last.data === "object" && "hostname" in (last.data as object) && (
+              <Text dimColor>
+                host {String((last.data as { hostname?: string }).hostname)}
+              </Text>
+            )}
+          </Box>
+        )}
+        <Box marginTop={1}>
+          <Text dimColor>
+            {agent.status === "pending" ? "a = approve · " : ""}
+            h = health check
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  return (
+    <Box flexDirection="column">
+      <Text dimColor>
+        hub {fleet.connected ? "connected" : "down"} · {agents.length} minion
+        {agents.length === 1 ? "" : "s"}
+      </Text>
+      {agents.map((a, i) => {
+        const on = i === selected;
+        return (
+          <Text key={a.agentId} inverse={on}>
+            {on ? "› " : "  "}
+            <Text color={presenceColor(a.presence)}>{a.presence.padEnd(8)}</Text>
+            <Text bold>{a.agentId.padEnd(22)}</Text>
+            <Text dimColor>{a.task.slice(0, 36)}</Text>
+          </Text>
+        );
+      })}
     </Box>
   );
 }
