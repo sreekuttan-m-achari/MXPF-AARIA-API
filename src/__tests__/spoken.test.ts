@@ -128,3 +128,41 @@ describe("hasSpeakableFirstSentence", () => {
     assert.equal(hasSpeakableFirstSentence("Still typing"), false);
   });
 });
+
+describe("pullStreamSpeech", () => {
+  it("emits sentences as they complete without replaying", async () => {
+    const { createStreamSpeechTracker, pullStreamSpeech } = await import(
+      "../spoken.js"
+    );
+    const tracker = createStreamSpeechTracker();
+    assert.deepEqual(pullStreamSpeech("Hello there", tracker), []);
+    assert.deepEqual(pullStreamSpeech("Hello there. More", tracker), [
+      "Hello there.",
+    ]);
+    assert.deepEqual(
+      pullStreamSpeech("Hello there. More coming soon. Extra.", tracker),
+      ["More coming soon.", "Extra."],
+    );
+    assert.deepEqual(
+      pullStreamSpeech("Hello there. More coming soon. Extra.", tracker, {
+        finalize: true,
+      }),
+      [],
+    );
+  });
+
+  it("speaks a provisional clip before punctuation", async () => {
+    process.env.AARIA_VOICE_PROVISIONAL_CHARS = "40";
+    const { createStreamSpeechTracker, pullStreamSpeech } = await import(
+      "../spoken.js"
+    );
+    const tracker = createStreamSpeechTracker();
+    const long = "Checking the nginx reverse proxy status on the edge host";
+    const units = pullStreamSpeech(long, tracker);
+    assert.equal(units.length, 1);
+    assert.ok(units[0]!.length >= 24);
+    // Completing the sentence should not re-speak the provisional prefix.
+    assert.deepEqual(pullStreamSpeech(`${long} now.`, tracker), []);
+    delete process.env.AARIA_VOICE_PROVISIONAL_CHARS;
+  });
+});

@@ -10,6 +10,17 @@ import { initTts } from "./tts.js";
 import { startServer } from "./ws.js";
 import { startWarmup } from "./warmup.js";
 
+// Broken pipes from Piper/paplay under memory pressure must not kill the API.
+process.on("uncaughtException", (err) => {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === "EPIPE" || code === "ECONNRESET") {
+    console.error(`[aria] swallowed ${code}: ${err.message}`);
+    return;
+  }
+  console.error("[aria] uncaughtException:", err);
+  process.exit(1);
+});
+
 logDebugStartup();
 initTts();
 

@@ -573,6 +573,115 @@ configure_mcp() {
   fi
 }
 
+# ── Voice (Piper) ─────────────────────────────────────────────────────────────
+
+download_piper_cori() {
+  local dir="$HOME/.local/share/piper"
+  local onnx="$dir/en_GB-cori-medium.onnx"
+  local conf="$dir/en_GB-cori-medium.onnx.json"
+  local base="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/cori/medium"
+  mkdir -p "$dir"
+  if [[ -f "$onnx" && -f "$conf" ]]; then
+    ok "Cori voice already present: $onnx"
+    return 0
+  fi
+  info "Downloading en_GB-cori-medium (~60MB) to $dir …"
+  if ! curl -fsSL -o "$onnx" "${base}/en_GB-cori-medium.onnx?download=true"; then
+    warn "Failed to download .onnx"
+    return 1
+  fi
+  if ! curl -fsSL -o "$conf" "${base}/en_GB-cori-medium.onnx.json?download=true"; then
+    warn "Failed to download .onnx.json"
+    return 1
+  fi
+  ok "Downloaded Cori voice"
+  return 0
+}
+
+configure_voice() {
+  step "Step 5b · Voice reply (local TTS, optional)"
+  hr
+
+  if [[ "$MODE" == "upgrade" ]] && ! prompt_yn "Review / update local voice (Piper) setup?" "n"; then
+    info "Keeping existing voice settings"
+    return 0
+  fi
+
+  if ! prompt_yn "Enable spoken replies via Piper (persistent model after warmup)?" "y"; then
+    info "Voice left unchanged / off — set AARIA_VOICE=0 to mute explicitly"
+    if [[ -f "$ROOT/.env" ]] && prompt_yn "Set AARIA_VOICE=0 in .env?" "n"; then
+      env_set AARIA_VOICE "0"
+    fi
+    return 0
+  fi
+
+  if ! command -v piper >/dev/null 2>&1; then
+    warn "piper not on PATH"
+    info "Install with:  uv tool install piper-tts"
+    info "           or:  pipx install piper-tts"
+    info "Then ensure ~/.local/bin is on PATH and re-run this step."
+    if prompt_yn "Try installing piper-tts with uv now?" "y"; then
+      if command -v uv >/dev/null 2>&1; then
+        uv tool install piper-tts && ok "piper-tts installed" || warn "uv tool install failed"
+      else
+        warn "uv not found — install from https://docs.astral.sh/uv/ then retry"
+      fi
+    fi
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v piper >/dev/null 2>&1; then
+      warn "piper still missing — voice will stay off until installed"
+      return 0
+    fi
+  else
+    ok "piper found: $(command -v piper)"
+  fi
+
+  local player=""
+  for candidate in paplay pw-play aplay; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      player="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$player" ]]; then
+    warn "No audio player found (need paplay, pw-play, or aplay)"
+    info "On PulseAudio/PipeWire desktops, paplay usually comes with pulseaudio-utils"
+  else
+    ok "Audio player: $player"
+  fi
+
+  local model=""
+  local default_onnx="$HOME/.local/share/piper/en_GB-cori-medium.onnx"
+  if [[ -f "$default_onnx" ]]; then
+    model="$default_onnx"
+    ok "Using existing model: $model"
+  elif prompt_yn "Download British Cori voice (en_GB-cori-medium)?" "y"; then
+    if download_piper_cori; then
+      model="$default_onnx"
+    fi
+  fi
+
+  if [[ -z "$model" ]]; then
+    local found
+    found="$(find "$HOME/.local/share/piper" -name '*.onnx' 2>/dev/null | head -1 || true)"
+    if [[ -n "$found" ]]; then
+      model="$found"
+      ok "Using discovered model: $model"
+    else
+      warn "No Piper .onnx model found — API will fall back to spd-say or off"
+    fi
+  fi
+
+  env_set AARIA_VOICE "1"
+  env_set AARIA_TTS "piper"
+  env_set AARIA_PIPER_PERSISTENT "1"
+  if [[ -n "$model" ]]; then
+    env_set AARIA_PIPER_MODEL "$model"
+  fi
+  ok "Voice enabled (persistent Piper — model loads once on API warmup)"
+  info "Logs to expect: mode=stream/persistent · persistent piper ready"
+}
+
 # ── CLI & PATH ──────────────────────────────────────────────────────────────────
 
 ensure_path_in_shell() {
@@ -1086,8 +1195,9 @@ main() {
     configure_env
     configure_persona
     configure_mcp
+    configure_voice
   else
-    step "Steps 3–5 · Config skipped (reinstall preserves local files)"
+    step "Steps 3–5b · Config skipped (reinstall preserves local files)"
     hr
     ok "Keeping existing .env / SOUL.md / USER.md / MEMORY.md / mcp.json"
   fi

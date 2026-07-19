@@ -438,6 +438,28 @@ function Invoke-ConfigureMcp {
     }
 }
 
+function Invoke-ConfigureVoice {
+    Write-Step "Step 5b · Voice reply (local TTS, optional)"
+    Write-Hr
+
+    if ($Script:Mode -eq "upgrade" -and -not (Prompt-YesNo "Review / update local voice (Piper) settings?" "n")) {
+        Write-Info "Keeping existing voice settings"
+        return
+    }
+
+    if (-not (Prompt-YesNo "Enable spoken replies (AARIA_VOICE + persistent Piper) in .env?" "n")) {
+        Write-Info "Skipped — see README Voice reply section for Piper setup"
+        return
+    }
+
+    Set-EnvValue "AARIA_VOICE" "1"
+    Set-EnvValue "AARIA_TTS" "piper"
+    Set-EnvValue "AARIA_PIPER_PERSISTENT" "1"
+    Write-Ok "Voice env enabled (persistent Piper)"
+    Write-Info "Install piper-tts and an .onnx voice; set AARIA_PIPER_MODEL — see README."
+    Write-Info "Audio playback on Windows may need a compatible player; Linux desktops use paplay."
+}
+
 function Invoke-InstallCli {
     Write-Step "Step 6 · aaria CLI"
     Write-Hr
@@ -694,8 +716,9 @@ if ($Script:Mode -ne "reinstall") {
     Invoke-ConfigureEnv
     Invoke-ConfigurePersona
     Invoke-ConfigureMcp
+    Invoke-ConfigureVoice
 } else {
-    Write-Step "Steps 3–5 · Config skipped (reinstall preserves local files)"
+    Write-Step "Steps 3–5b · Config skipped (reinstall preserves local files)"
     Write-Hr
     Write-Ok "Keeping existing .env / SOUL.md / USER.md / MEMORY.md / mcp.json"
 }

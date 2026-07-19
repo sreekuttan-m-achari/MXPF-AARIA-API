@@ -9,13 +9,12 @@ import { isChatCancelled } from "./errors.js";
 import { scheduleLearnReview } from "./learn/review.js";
 import { expandWithSkill } from "./skills/index.js";
 import {
-  buildAckLineSpeech,
-  buildReplySpeech,
-  hasSpeakableFirstSentence,
+  createStreamSpeechTracker,
+  pullStreamSpeech,
 } from "./spoken.js";
 import { waitForWarmup } from "./warmup.js";
 import { isRecoverableRunError, runChatTurn } from "./stream.js";
-import { speak, stopSpeech } from "./tts.js";
+import { enqueueSpeech, stopSpeech } from "./tts.js";
 
 export type ChatTurnOptions = {
   learn?: boolean;
@@ -46,9 +45,9 @@ export async function handleChatTurn(
   const started = Date.now();
   const expanded = expandWithSkill(message);
   const voiceOn = voiceEnabledForTurn(transport, options);
-  let spokeAck = false;
-  let ackLine = "";
+  const speech = createStreamSpeechTracker();
   let streamed = "";
+
   try {
     const reply = await runChatTurn(
       agent,
@@ -57,13 +56,10 @@ export async function handleChatTurn(
         streamed += text;
         logStreamChunk(id, text);
         onChunk?.(text);
-        // Speak the opening acknowledgement as soon as the first sentence lands.
-        if (voiceOn && !spokeAck && hasSpeakableFirstSentence(streamed)) {
-          const line = buildAckLineSpeech(streamed);
-          if (line) {
-            spokeAck = true;
-            ackLine = line;
-            speak(line);
+        // Speak only assistant text as it streams — never echo the user message.
+        if (voiceOn) {
+          for (const unit of pullStreamSpeech(streamed, speech)) {
+            enqueueSpeech(unit);
           }
         }
       },
@@ -77,12 +73,9 @@ export async function handleChatTurn(
       durationMs: Date.now() - started,
     });
     if (voiceOn) {
-      const finalLine = buildReplySpeech(reply);
-      // Speak the completed reply (char-budgeted). Skip if it's the same as the ack.
-      if (finalLine && finalLine !== ackLine) {
-        speak(finalLine);
-      } else if (finalLine && !spokeAck) {
-        speak(finalLine);
+      // Finish any leftover sentences without interrupting mid-stream speech.
+      for (const unit of pullStreamSpeech(reply, speech, { finalize: true })) {
+        enqueueSpeech(unit);
       }
     }
     if (options?.learn !== false) {

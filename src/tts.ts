@@ -9,7 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { freemem, homedir, totalmem, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { applySpeechPronunciations } from "./spoken.js";
@@ -32,6 +32,18 @@ let lastWarmAt = 0;
 let cachedChimePath: string | null = null;
 /** Runtime mute override; null = follow AARIA_VOICE env / default. */
 let runtimeVoiceOverride: boolean | null = null;
+
+/** FIFO of utterances to speak without interrupting the current one. */
+let speechQueue: string[] = [];
+let draining = false;
+/** Bumped on interrupt so late exit handlers from killed procs are ignored. */
+let utteranceGen = 0;
+
+/** Long-lived Piper process with model kept in memory. */
+let persistentPiper: ChildProcess | null = null;
+let persistentStartPromise: Promise<boolean> | null = null;
+/** Forwards PCM from persistent Piper; null = discard (idle / warmup). */
+let pcmForward: ((chunk: Buffer) => void) | null = null;
 
 
 function which(bin: string): string | null {
@@ -94,6 +106,7 @@ export function setVoiceEnabled(on: boolean): VoiceStatus {
   runtimeVoiceOverride = on;
   if (!on) {
     stopSpeech();
+    destroyPersistentPiper();
     console.error("[aria-voice] muted (runtime)");
   } else {
     // Re-probe if we started muted or previously marked off
@@ -133,13 +146,33 @@ function findPiperModel(): string | null {
 
   for (const dir of candidates) {
     if (!existsSync(dir)) continue;
-    const found = findOnnxRecursive(dir, 3);
+    const found = findOnnxRecursive(dir, 3, preferLowPiperVoice());
     if (found) return found;
   }
   return null;
 }
 
-function findOnnxRecursive(dir: string, depth: number): string | null {
+/**
+ * Prefer lighter ONNX voices when the host is RAM-constrained.
+ * Override with AARIA_PIPER_QUALITY=low|medium.
+ */
+function preferLowPiperVoice(): boolean {
+  const raw = process.env.AARIA_PIPER_QUALITY?.trim().toLowerCase();
+  if (raw === "low") return true;
+  if (raw === "medium" || raw === "high") return false;
+  // Auto: <5 GiB total or <1.2 GiB free → low (model load is brutal under pressure).
+  try {
+    return totalmem() < 5 * 1024 ** 3 || freemem() < 1.2 * 1024 ** 3;
+  } catch {
+    return false;
+  }
+}
+
+function findOnnxRecursive(
+  dir: string,
+  depth: number,
+  preferLow: boolean,
+): string | null {
   if (depth < 0) return null;
   let entries: string[];
   try {
@@ -148,23 +181,37 @@ function findOnnxRecursive(dir: string, depth: number): string | null {
     return null;
   }
   const onnx = entries.filter((e) => e.endsWith(".onnx")).sort();
-  // ARIA: prefer British female (FRIDAY-like), then US female medium
-  const preferred =
-    onnx.find((e) => e.includes("en_GB") && e.includes("cori") && e.includes("medium")) ??
-    onnx.find((e) => e.includes("en_GB") && e.includes("alba") && e.includes("medium")) ??
-    onnx.find((e) => e.includes("en_GB") && e.includes("medium")) ??
-    onnx.find((e) => e.includes("kristin") && e.includes("medium")) ??
-    onnx.find((e) => e.includes("amy") && e.includes("medium")) ??
-    onnx.find((e) => e.includes("hfc_female") && e.includes("medium")) ??
-    onnx.find((e) => e.includes("lessac") && e.includes("medium")) ??
-    onnx.find((e) => e.includes("medium")) ??
-    onnx[0];
+  const pickPreferred = (list: string[]): string | undefined => {
+    if (preferLow) {
+      return (
+        list.find((e) => e.includes("en_GB") && e.includes("low")) ??
+        list.find((e) => e.includes("en_US") && e.includes("low")) ??
+        list.find((e) => e.includes("low")) ??
+        list.find((e) => e.includes("en_GB") && e.includes("medium")) ??
+        list.find((e) => e.includes("medium")) ??
+        list[0]
+      );
+    }
+    // ARIA default: British female medium (FRIDAY-like), then US female medium
+    return (
+      list.find((e) => e.includes("en_GB") && e.includes("cori") && e.includes("medium")) ??
+      list.find((e) => e.includes("en_GB") && e.includes("alba") && e.includes("medium")) ??
+      list.find((e) => e.includes("en_GB") && e.includes("medium")) ??
+      list.find((e) => e.includes("kristin") && e.includes("medium")) ??
+      list.find((e) => e.includes("amy") && e.includes("medium")) ??
+      list.find((e) => e.includes("hfc_female") && e.includes("medium")) ??
+      list.find((e) => e.includes("lessac") && e.includes("medium")) ??
+      list.find((e) => e.includes("medium")) ??
+      list[0]
+    );
+  };
+  const preferred = pickPreferred(onnx);
   if (preferred) return join(dir, preferred);
   for (const e of entries) {
     const full = join(dir, e);
     try {
       if (!statSync(full).isDirectory()) continue;
-      const nested = findOnnxRecursive(full, depth - 1);
+      const nested = findOnnxRecursive(full, depth - 1, preferLow);
       if (nested) return nested;
     } catch {
       /* skip */
@@ -253,6 +300,30 @@ function piperPreferWav(): boolean {
   return raw === "1" || raw?.toLowerCase() === "true";
 }
 
+/**
+ * Keep Piper loaded across utterances (default on).
+ * Set AARIA_PIPER_PERSISTENT=0 to restore one-shot spawn per speak.
+ */
+function piperPersistentEnabled(): boolean {
+  const raw = process.env.AARIA_PIPER_PERSISTENT?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "off" || raw === "no") {
+    return false;
+  }
+  return true;
+}
+
+/** Piper reads line-oriented stdin — collapse newlines so one utterance = one line. */
+function collapseSpeechLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** Idle gap after PCM stops → end of current utterance (model still loaded). */
+function piperPcmIdleMs(): number {
+  const raw = process.env.AARIA_PIPER_PCM_IDLE_MS?.trim();
+  const n = raw ? Number.parseInt(raw, 10) : 280;
+  return Number.isFinite(n) && n >= 80 ? n : 280;
+}
+
 function piperBaseArgs(model: string): string[] {
   const args = [
     "--model",
@@ -283,6 +354,7 @@ function piperPlayerRawArgs(playerBin: string): string[] {
 /**
  * Synthesize a short silent warmup (no playback) and wait for completion
  * so ONNX + page cache are hot before the first user-facing utterance.
+ * Used when persistent mode is off or failed to start.
  */
 function warmupPiperOnce(model: string): Promise<void> {
   const wav = join(tmpdir(), `aria-piper-warmup-${process.pid}-${Date.now()}.wav`);
@@ -305,8 +377,11 @@ function warmupPiperOnce(model: string): Promise<void> {
       { stdio: ["pipe", "ignore", "ignore"] },
     );
     // Slightly longer than "ok" so more of the model path is exercised.
-    child.stdin?.write("Systems online.");
-    child.stdin?.end();
+    child.stdin?.on("error", () => {
+      /* EPIPE during warmup — ignore */
+    });
+    safeWrite(child.stdin, "Systems online.");
+    safeEnd(child.stdin);
 
     child.on("exit", finish);
     child.on("error", finish);
@@ -322,6 +397,147 @@ function warmupPiperOnce(model: string): Promise<void> {
   });
 }
 
+function destroyPersistentPiper(): void {
+  pcmForward = null;
+  const proc = persistentPiper;
+  persistentPiper = null;
+  if (!proc) return;
+  try {
+    proc.stdin?.end();
+  } catch {
+    /* ignore */
+  }
+  killProc(proc);
+}
+
+function persistentPiperAlive(): boolean {
+  return Boolean(
+    persistentPiper &&
+      persistentPiper.exitCode === null &&
+      !persistentPiper.killed &&
+      persistentPiper.stdin &&
+      persistentPiper.stdout,
+  );
+}
+
+/**
+ * Wait until Piper stdout goes idle after producing audio (end of one line synth).
+ * Cold load: allow long first wait; after bytes arrive, use short idle gap.
+ */
+function waitPiperPcmIdle(opts?: {
+  maxMs?: number;
+  requireBytes?: boolean;
+}): Promise<{ bytes: number }> {
+  const maxMs = opts?.maxMs ?? 45_000;
+  const requireBytes = opts?.requireBytes ?? true;
+  const idleMs = piperPcmIdleMs();
+
+  return new Promise((resolve) => {
+    let bytes = 0;
+    let settled = false;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let maxTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (idleTimer) clearTimeout(idleTimer);
+      if (maxTimer) clearTimeout(maxTimer);
+      if (pcmForward === onData) pcmForward = null;
+      resolve({ bytes });
+    };
+
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (!requireBytes || bytes > 0) finish();
+      }, idleMs);
+    };
+
+    const onData = (chunk: Buffer) => {
+      bytes += chunk.length;
+      armIdle();
+    };
+
+    pcmForward = onData;
+    // If bytes already flowing isn't the case — start idle only after data,
+    // or resolve on max timeout for hung synth.
+    maxTimer = setTimeout(finish, maxMs);
+    if (!requireBytes) armIdle();
+  });
+}
+
+/** Write one line to persistent Piper and discard PCM until idle. */
+async function persistentSynthDiscard(text: string): Promise<number> {
+  if (!persistentPiperAlive()) return 0;
+  const line = collapseSpeechLine(text);
+  if (!line) return 0;
+  const wait = waitPiperPcmIdle({ maxMs: 45_000, requireBytes: true });
+  safeWrite(persistentPiper!.stdin, `${line}\n`);
+  const { bytes } = await wait;
+  return bytes;
+}
+
+async function ensurePersistentPiper(model: string): Promise<boolean> {
+  if (persistentPiperAlive()) {
+    return true;
+  }
+  if (persistentStartPromise) {
+    return persistentStartPromise;
+  }
+
+  persistentStartPromise = (async () => {
+    try {
+      destroyPersistentPiper();
+      const piper = spawn(
+        "piper",
+        [...piperBaseArgs(model), "--output-raw"],
+        { stdio: ["pipe", "pipe", "ignore"] },
+      );
+      persistentPiper = piper;
+
+      ignorePipeErrors(piper.stdin);
+      ignorePipeErrors(piper.stdout);
+      piper.stdout?.on("data", (chunk: Buffer) => {
+        pcmForward?.(chunk);
+      });
+      piper.once("exit", (code, signal) => {
+        if (persistentPiper === piper) {
+          persistentPiper = null;
+          console.error(
+            `[aria-voice] persistent piper exited code=${code ?? "?"} signal=${signal ?? ""}`,
+          );
+        }
+      });
+      piper.once("error", (err) => {
+        console.error("[aria-voice] persistent piper error:", err.message);
+        if (persistentPiper === piper) persistentPiper = null;
+      });
+
+      // Force ONNX load; discard audio.
+      const bytes = await persistentSynthDiscard("Systems online.");
+      if (!persistentPiperAlive()) {
+        return false;
+      }
+      console.error(
+        `[aria-voice] persistent piper ready (warmup pcm ${bytes} bytes)`,
+      );
+      return true;
+    } catch (err) {
+      console.error(
+        "[aria-voice] persistent piper start failed:",
+        err instanceof Error ? err.message : err,
+      );
+      destroyPersistentPiper();
+      return false;
+    } finally {
+      persistentStartPromise = null;
+    }
+  })();
+
+  return persistentStartPromise;
+}
+
 function scheduleBackgroundWarmup(_model: string): void {
   void warmVoice(false).catch(() => undefined);
 }
@@ -329,6 +545,7 @@ function scheduleBackgroundWarmup(_model: string): void {
 /**
  * Awaitable voice warmup — called from TUI boot and optional /voice/warmup.
  * Dedupes concurrent callers; skips if warmed within the last 60s.
+ * With persistent Piper, this loads the model once into a long-lived child.
  */
 export async function warmVoice(force = false): Promise<{
   ok: boolean;
@@ -353,7 +570,17 @@ export async function warmVoice(force = false): Promise<{
   warmupPromise = (async () => {
     try {
       if (engine === "piper" && probe?.piperModel) {
-        await warmupPiperOnce(probe.piperModel);
+        if (piperPersistentEnabled() && !piperPreferWav()) {
+          const ok = await ensurePersistentPiper(probe.piperModel);
+          if (!ok) {
+            console.error(
+              "[aria-voice] persistent start failed — falling back to one-shot warmup",
+            );
+            await warmupPiperOnce(probe.piperModel);
+          }
+        } else {
+          await warmupPiperOnce(probe.piperModel);
+        }
       }
       lastWarmAt = Date.now();
       const ms = Date.now() - started;
@@ -425,10 +652,15 @@ export function initTts(): TtsEngine {
 
   if (probe.engine === "piper") {
     const playerName = (probe.player ?? "").split("/").pop() ?? "";
-    const mode =
+    const streamMode =
       piperPreferWav() || playerName === "afplay" ? "wav" : "stream";
+    const persist =
+      piperPersistentEnabled() && streamMode === "stream"
+        ? "persistent"
+        : "oneshot";
+    const quality = preferLowPiperVoice() ? "low-prefer" : "medium-prefer";
     console.error(
-      `[aria-voice] engine=piper model=${probe.piperModel} player=${probe.player} mode=${mode} length_scale=${piperLengthScale()} sentence_silence=${piperSentenceSilence()}s`,
+      `[aria-voice] engine=piper model=${probe.piperModel} player=${probe.player} mode=${streamMode}/${persist} quality=${quality} length_scale=${piperLengthScale()} sentence_silence=${piperSentenceSilence()}s`,
     );
     if (probe.piperModel) {
       scheduleBackgroundWarmup(probe.piperModel);
@@ -455,16 +687,80 @@ function killProc(proc: ChildProcess | null): void {
   }
 }
 
-/** Stop any in-flight speech. */
+/** Ignore broken-pipe / reset — common when paplay/piper exits under memory pressure. */
+function isBenignPipeError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EPIPE" || code === "ECONNRESET" || code === "ERR_STREAM_DESTROYED";
+}
+
+function ignorePipeErrors(stream: NodeJS.EventEmitter | null | undefined): void {
+  if (!stream) return;
+  stream.on("error", (err: unknown) => {
+    if (isBenignPipeError(err)) return;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[aria-voice] stream error:", msg);
+  });
+}
+
+function safeWrite(
+  stream: NodeJS.WritableStream | null | undefined,
+  data: string | Buffer,
+): boolean {
+  if (!stream) return false;
+  const writable = stream as NodeJS.WritableStream & {
+    destroyed?: boolean;
+    writable?: boolean;
+  };
+  if (writable.destroyed || writable.writable === false) return false;
+  try {
+    return stream.write(data);
+  } catch (err) {
+    if (!isBenignPipeError(err)) {
+      console.error(
+        "[aria-voice] write failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+    return false;
+  }
+}
+
+function safeEnd(stream: NodeJS.WritableStream | null | undefined): void {
+  if (!stream) return;
+  try {
+    stream.end();
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Stop any in-flight playback and clear the queue (keeps persistent Piper). */
 export function stopSpeech(): void {
+  speechQueue = [];
+  draining = false;
+  utteranceGen += 1;
+  const discardGen = utteranceGen;
   killProc(activePlayer);
   killProc(active);
   activePlayer = null;
   active = null;
   cleanupTempDir();
+  // Discard any PCM still arriving from the living Piper so the next line is clean.
+  if (persistentPiperAlive()) {
+    pcmForward = () => {
+      /* discard */
+    };
+    setTimeout(() => {
+      if (utteranceGen === discardGen) {
+        pcmForward = null;
+      }
+    }, Math.max(400, piperPcmIdleMs() * 2));
+  } else {
+    pcmForward = null;
+  }
 }
 
-function speakSpdSay(text: string): void {
+function speakSpdSay(text: string, gen: number, onDone: () => void): void {
   const rate = spdSayRate();
   const args = [
     "--wait",
@@ -478,16 +774,25 @@ function speakSpdSay(text: string): void {
     stdio: ["ignore", "ignore", "ignore"],
   });
   active = child;
-  child.on("exit", () => {
+  const finish = () => {
+    if (gen !== utteranceGen) return;
     if (active === child) active = null;
-  });
+    onDone();
+  };
+  child.on("exit", finish);
   child.on("error", (err) => {
     console.error("[aria-voice] spd-say error:", err.message);
-    if (active === child) active = null;
+    finish();
   });
 }
 
-function speakPiperRaw(text: string, model: string, playerBin: string): void {
+function speakPiperRaw(
+  text: string,
+  model: string,
+  playerBin: string,
+  gen: number,
+  onDone: () => void,
+): void {
   const piper = spawn(
     "piper",
     [...piperBaseArgs(model), "--output-raw"],
@@ -500,33 +805,64 @@ function speakPiperRaw(text: string, model: string, playerBin: string): void {
   active = piper;
   activePlayer = player;
 
-  piper.stdout?.pipe(player.stdin!);
-  piper.stdin?.write(text);
-  piper.stdin?.end();
+  ignorePipeErrors(piper.stdin);
+  ignorePipeErrors(piper.stdout);
+  ignorePipeErrors(player.stdin);
+  if (piper.stdout && player.stdin) {
+    piper.stdout.pipe(player.stdin, { end: true });
+  }
+  safeWrite(piper.stdin, text);
+  safeEnd(piper.stdin);
 
-  const clear = (proc: ChildProcess) => {
-    if (active === proc) active = null;
-    if (activePlayer === proc) activePlayer = null;
+  let piperDone = false;
+  let playerDone = false;
+  const maybeFinish = () => {
+    if (gen !== utteranceGen) return;
+    if (!piperDone || !playerDone) return;
+    if (active === piper) active = null;
+    if (activePlayer === player) activePlayer = null;
+    onDone();
   };
 
   piper.on("exit", (code) => {
-    if (code !== 0 && active === piper) {
+    if (code !== 0 && gen === utteranceGen && active === piper) {
       console.error(`[aria-voice] piper exited code=${code ?? "?"}`);
     }
-    clear(piper);
+    piperDone = true;
+    safeEnd(player.stdin);
+    maybeFinish();
   });
-  player.on("exit", () => clear(player));
+  player.on("exit", () => {
+    playerDone = true;
+    maybeFinish();
+  });
   piper.on("error", (err) => {
-    console.error("[aria-voice] piper error:", err.message);
-    clear(piper);
+    if (!isBenignPipeError(err)) {
+      console.error("[aria-voice] piper error:", err.message);
+    }
+    piperDone = true;
+    playerDone = true;
+    killProc(player);
+    maybeFinish();
   });
   player.on("error", (err) => {
-    console.error("[aria-voice] player error:", err.message);
-    clear(player);
+    if (!isBenignPipeError(err)) {
+      console.error("[aria-voice] player error:", err.message);
+    }
+    playerDone = true;
+    piperDone = true;
+    killProc(piper);
+    maybeFinish();
   });
 }
 
-function speakPiperWav(text: string, model: string, playerBin: string): void {
+function speakPiperWav(
+  text: string,
+  model: string,
+  playerBin: string,
+  gen: number,
+  onDone: () => void,
+): void {
   cleanupTempDir();
   const dir = mkdtempSync(join(tmpdir(), "aria-voice-"));
   activeTempDir = dir;
@@ -538,21 +874,25 @@ function speakPiperWav(text: string, model: string, playerBin: string): void {
   });
   active = piper;
 
-  piper.stdin?.write(text);
-  piper.stdin?.end();
+  ignorePipeErrors(piper.stdin);
+  safeWrite(piper.stdin, text);
+  safeEnd(piper.stdin);
 
   piper.on("exit", (code, signal) => {
+    if (gen !== utteranceGen) return;
     if (active === piper) active = null;
     if (code !== 0) {
       console.error(
         `[aria-voice] piper exited code=${code ?? "?"} signal=${signal ?? ""}`,
       );
       cleanupTempDir();
+      onDone();
       return;
     }
     if (!existsSync(wavPath)) {
       console.error("[aria-voice] piper produced no wav output");
       cleanupTempDir();
+      onDone();
       return;
     }
     const player = spawn(playerBin, [wavPath], {
@@ -560,36 +900,226 @@ function speakPiperWav(text: string, model: string, playerBin: string): void {
     });
     activePlayer = player;
     player.on("exit", () => {
+      if (gen !== utteranceGen) return;
       if (activePlayer === player) activePlayer = null;
       cleanupTempDir();
+      onDone();
     });
     player.on("error", (err) => {
       console.error("[aria-voice] player error:", err.message);
+      if (gen !== utteranceGen) return;
       if (activePlayer === player) activePlayer = null;
       cleanupTempDir();
+      onDone();
     });
   });
 
   piper.on("error", (err) => {
     console.error("[aria-voice] piper error:", err.message);
+    if (gen !== utteranceGen) return;
     if (active === piper) active = null;
     cleanupTempDir();
+    onDone();
   });
 }
 
-function speakPiper(text: string, model: string, playerBin: string): void {
+function speakPiperPersistent(
+  text: string,
+  model: string,
+  playerBin: string,
+  gen: number,
+  onDone: () => void,
+): void {
+  void (async () => {
+    const ok = await ensurePersistentPiper(model);
+    if (gen !== utteranceGen) {
+      onDone();
+      return;
+    }
+    if (!ok || !persistentPiperAlive()) {
+      console.error(
+        "[aria-voice] persistent unavailable — one-shot fallback for utterance",
+      );
+      speakPiperRaw(text, model, playerBin, gen, onDone);
+      return;
+    }
+
+    killProc(activePlayer);
+    activePlayer = null;
+
+    // Drop leftover PCM from a cancelled utterance before writing the next line.
+    pcmForward = () => {
+      /* discard */
+    };
+    await new Promise<void>((r) => setTimeout(r, piperPcmIdleMs()));
+    if (gen !== utteranceGen) {
+      onDone();
+      return;
+    }
+
+    const player = spawn(playerBin, piperPlayerRawArgs(playerBin), {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    activePlayer = player;
+    ignorePipeErrors(player.stdin);
+
+    let settled = false;
+    let gotData = false;
+    let doneCalled = false;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let maxTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const doneOnce = () => {
+      if (doneCalled) return;
+      doneCalled = true;
+      if (activePlayer === player) activePlayer = null;
+      onDone();
+    };
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (idleTimer) clearTimeout(idleTimer);
+      if (maxTimer) clearTimeout(maxTimer);
+      if (pcmForward === onPcm) pcmForward = null;
+      safeEnd(player.stdin);
+      let playerEnded = false;
+      player.once("exit", () => {
+        playerEnded = true;
+        doneOnce();
+      });
+      player.once("error", () => {
+        playerEnded = true;
+        doneOnce();
+      });
+      setTimeout(() => {
+        if (!playerEnded) {
+          killProc(player);
+          doneOnce();
+        }
+      }, 2_000);
+    };
+
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        if (gen !== utteranceGen) {
+          finish();
+          return;
+        }
+        if (gotData) finish();
+      }, piperPcmIdleMs());
+    };
+
+    const onPcm = (chunk: Buffer) => {
+      if (gen !== utteranceGen) return;
+      gotData = true;
+      if (!safeWrite(player.stdin, chunk)) {
+        // Player closed mid-stream — stop forwarding and finish.
+        finish();
+        return;
+      }
+      armIdle();
+    };
+
+    pcmForward = onPcm;
+    maxTimer = setTimeout(() => {
+      console.error("[aria-voice] persistent utterance timed out");
+      finish();
+    }, 60_000);
+
+    if (!safeWrite(persistentPiper!.stdin, `${collapseSpeechLine(text)}\n`)) {
+      console.error("[aria-voice] persistent write failed — respawning piper");
+      destroyPersistentPiper();
+      finish();
+      return;
+    }
+  })();
+}
+
+function speakPiper(
+  text: string,
+  model: string,
+  playerBin: string,
+  gen: number,
+  onDone: () => void,
+): void {
   const playerName = playerBin.split("/").pop() ?? playerBin;
   // afplay cannot consume raw PCM on stdin — always use a temp WAV.
   if (piperPreferWav() || playerName === "afplay") {
-    speakPiperWav(text, model, playerBin);
-  } else {
-    speakPiperRaw(text, model, playerBin);
+    speakPiperWav(text, model, playerBin, gen, onDone);
+    return;
+  }
+  if (piperPersistentEnabled()) {
+    speakPiperPersistent(text, model, playerBin, gen, onDone);
+    return;
+  }
+  speakPiperRaw(text, model, playerBin, gen, onDone);
+}
+
+function startUtterance(text: string, onDone: () => void): void {
+  if (!isVoiceEnabled()) {
+    onDone();
+    return;
+  }
+  const engine = getTtsEngine();
+  if (engine === "off") {
+    onDone();
+    return;
+  }
+  const line = applySpeechPronunciations(text.trim());
+  if (!line) {
+    onDone();
+    return;
+  }
+
+  const gen = utteranceGen;
+  try {
+    if (engine === "piper" && probe?.piperModel && probe.player) {
+      speakPiper(line, probe.piperModel, probe.player, gen, onDone);
+      return;
+    }
+    if (engine === "spd-say") {
+      speakSpdSay(line, gen, onDone);
+      return;
+    }
+    onDone();
+  } catch (err) {
+    console.error(
+      "[aria-voice] speak failed:",
+      err instanceof Error ? err.message : err,
+    );
+    onDone();
   }
 }
 
+function drainQueue(): void {
+  if (draining) return;
+  const next = speechQueue.shift();
+  if (!next) return;
+  draining = true;
+  startUtterance(next, () => {
+    draining = false;
+    drainQueue();
+  });
+}
+
 /**
- * Speak text with the configured backend. Non-blocking; soft-fails.
- * Replaces any currently playing utterance.
+ * Queue text to speak after the current utterance (does not interrupt).
+ * Use for mid-stream reply sentences so speech stays in order with print.
+ */
+export function enqueueSpeech(text: string): void {
+  if (!isVoiceEnabled()) return;
+  const line = applySpeechPronunciations(text.trim());
+  if (!line) return;
+  if (getTtsEngine() === "off") return;
+  speechQueue.push(line);
+  drainQueue();
+}
+
+/**
+ * Speak text immediately, replacing any current utterance and clearing the queue.
+ * Use for cancel, mute, greetings, and explicit interrupts.
  */
 export function speak(text: string): void {
   if (!isVoiceEnabled()) return;
@@ -598,23 +1128,30 @@ export function speak(text: string): void {
   const line = applySpeechPronunciations(text.trim());
   if (!line) return;
 
-  stopSpeech();
-
-  try {
-    if (engine === "piper" && probe?.piperModel && probe.player) {
-      speakPiper(line, probe.piperModel, probe.player);
-      return;
-    }
-    if (engine === "spd-say") {
-      speakSpdSay(line);
-      return;
-    }
-  } catch (err) {
-    console.error(
-      "[aria-voice] speak failed:",
-      err instanceof Error ? err.message : err,
-    );
+  speechQueue = [];
+  utteranceGen += 1;
+  const discardGen = utteranceGen;
+  killProc(activePlayer);
+  killProc(active);
+  activePlayer = null;
+  active = null;
+  cleanupTempDir();
+  if (persistentPiperAlive()) {
+    pcmForward = () => {
+      /* discard */
+    };
+    setTimeout(() => {
+      if (utteranceGen === discardGen) pcmForward = null;
+    }, piperPcmIdleMs());
+  } else {
+    pcmForward = null;
   }
+
+  draining = true;
+  startUtterance(line, () => {
+    draining = false;
+    drainQueue();
+  });
 }
 
 /** Soft sine chime WAV (cached) — no Piper needed. */
@@ -714,9 +1251,11 @@ export function voiceCapabilitySummary(): string | undefined {
     "Local TTS is enabled on this desktop.",
     `Engine: ${engine}${engine === "piper" ? ` (${model})` : ""}.`,
     "Spoken accent/tone: British English, calm and composed — FRIDAY-like.",
+    "Piper keeps the voice model loaded in a persistent process after warmup.",
     "On TUI open, the startup greeting may be spoken aloud.",
-    "While streaming, speak the first acknowledgement sentence early.",
-    "When the turn finishes, speak a short clipped summary of the reply (AARIA_VOICE_MAX_CHARS) — not code, not “Done”.",
+    "While streaming, speak each new assistant sentence as it lands (queued).",
+    "Never speak the user’s message back.",
+    "When the turn finishes, only speak leftover assistant text not already queued.",
     "Listening / microphone is not available yet.",
   ].join("\n");
 }
@@ -724,6 +1263,7 @@ export function voiceCapabilitySummary(): string | undefined {
 /** Test helper: reset cached probe (not for production). */
 export function _resetTtsProbeForTests(): void {
   stopSpeech();
+  destroyPersistentPiper();
   probe = null;
   runtimeVoiceOverride = null;
 }

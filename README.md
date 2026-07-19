@@ -129,7 +129,8 @@ Persona is data-driven — edit `SOUL.md` (who she is), `USER.md` (who you are),
 Clone/enter the project, then choose **host** or **Docker**.
 
 **Quick path (recommended):** run the guided installer — prerequisites, `.env`, persona
-files, CLI, background service (Linux/Windows), and health checks in one flow:
+files, optional MCP + **local Piper voice**, CLI, background service (Linux/Windows), and
+health checks in one flow:
 
 ```bash
 # Linux / macOS (same script)
@@ -327,18 +328,36 @@ All settings are environment variables (see `.env-sample`). Common ones:
 | `AARIA_HEARTBEAT_EVERY` | `5m` | Default heartbeat interval (`30s`, `5m`, `1h`, …) |
 | `AARIA_MORNING_BRIEF` | on | First WebSocket connect each day triggers a morning brief |
 | `AARIA_TIMEZONE` | — | Override `USER.md` timezone for daily brief (default `Asia/Kolkata`) |
-| `AARIA_VOICE` | on if backend found | Set `0` to disable local TTS done lines |
+| `AARIA_VOICE` | on if backend found | Set `0` to disable local TTS |
 | `AARIA_TTS` | `auto` | `auto` \| `piper` \| `spd-say` |
 | `AARIA_PIPER_MODEL` | auto-discover | Path to Piper `.onnx` voice |
-| `AARIA_VOICE_MAX_CHARS` | `280` | Max chars for spoken snippets |
+| `AARIA_PIPER_PERSISTENT` | `1` (on) | Keep Piper+model loaded after warmup; `0` = spawn per utterance |
+| `AARIA_PIPER_PCM_IDLE_MS` | `280` | Persistent mode: silence gap that ends an utterance |
+| `AARIA_PIPER_QUALITY` | auto | `low` \| `medium` — auto prefers low on &lt;5 GiB RAM / tight free RAM |
+| `AARIA_VOICE_MAX_CHARS` | `280` | Max chars spoken per turn (budget across sentences) |
+| `AARIA_VOICE_PROVISIONAL_CHARS` | `72` | Speak a short clip before the first `.!?` lands |
 
 ### Voice reply (local TTS)
 
-The API speaks a **short done** line when an interactive chat turn finishes (TUI, plasmoid, HTTP/WS) — not your message, and not the full technical reply. Scheduler jobs and morning briefs stay silent. No extra Cursor tokens — text is clipped with heuristics.
+The API speaks during interactive chat (TUI, plasmoid, HTTP/WS). Scheduler jobs and morning briefs stay silent. No extra Cursor tokens — text is cleaned/clipped with heuristics.
 
-**Character voice:** British English Piper **Cori** (`en_GB-cori-medium`) by default — calm, composed, FRIDAY-like. Pace defaults to `AARIA_PIPER_LENGTH_SCALE=1.06`.
+**What you hear (per turn):**
+1. **Each new sentence** of AARIA’s reply as it streams (queued; does not cut off the previous line)  
+2. Any leftover fragment at end of turn — **not** a full replay of text already spoken  
+3. Startup **greeting** / other API notifications when those fire  
 
-**Latency:** the TUI calls `POST /voice/warmup` on boot to pre-load Piper before the first reply. The API also warms Piper in the background at process start.
+User messages are **never** spoken back.
+
+**Character voice:** British English Piper **Cori** (`en_GB-cori-medium`) by default — calm, composed, FRIDAY-like. Pace defaults to `AARIA_PIPER_LENGTH_SCALE≈1`.
+
+**Latency (persistent Piper — default):**
+- On API boot / `POST /voice/warmup`, AARIA starts a **long-lived** `piper --output-raw` process and loads the ONNX model **once** (~10–15 s on a mid-range CPU).  
+- Later utterances reuse that process (~0.5 s to first audio instead of reloading ~12 s every time).  
+- The TUI also calls warmup on boot so the first spoken reply is already hot.  
+- Cancel / `/voice off` stops playback; the model stays loaded until the API exits or voice is muted.  
+- Set `AARIA_PIPER_PERSISTENT=0` to restore legacy one-shot spawn (slow; debugging only).
+
+Design notes: `docs/superpowers/specs/2026-07-17-aaria-voice-reply-design.md` and `docs/superpowers/specs/2026-07-19-persistent-piper-tts-design.md`.
 
 Backends (auto-detected):
 
@@ -363,7 +382,12 @@ curl -fsSL -o en_GB-cori-medium.onnx.json \
   "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/cori/medium/en_GB-cori-medium.onnx.json?download=true"
 ```
 
-Startup logs which engine is active: `[aria-voice] engine=…`.
+On RAM-tight hosts (&lt;5 GiB), prefer a **low** voice if you have one installed (`AARIA_PIPER_QUALITY=low`), or pin `AARIA_PIPER_MODEL` to a `*-low.onnx` file.
+
+Startup logs which engine is active, e.g.  
+`[aria-voice] engine=piper … mode=stream/persistent` and  
+`[aria-voice] persistent piper ready (…)`.
+The guided installer can download the voice and set these env vars (`bash deploy/install-upgrade.sh`).
 
 ### Morning brief (first connect)
 
@@ -534,6 +558,18 @@ MXPF-AARIA-API/
 - **Docker healthcheck stuck `starting`** — first boot warms the agent; allow ~40s
   (`start_period`). Inspect with `docker compose logs -f aaria-api`.
 - **Fresh session wanted** — remove the state volume: `docker compose down -v`.
+- **Voice lag / long pause before speech** — ensure persistent Piper is on (default).
+  Logs should show `mode=stream/persistent` and `persistent piper ready`. First warmup
+  after restart still takes ~10–15 s (model load); later utterances should be ~sub-second.
+  If you see one-shot reloads every time, check `AARIA_PIPER_PERSISTENT` is not `0` and
+  `AARIA_PIPER_WAV` is not `1`. On low-RAM hosts, install a `*-low.onnx` voice.
+- **No speech at all** — `piper` on `PATH`, player (`paplay`/`pw-play`/`aplay`), and an
+  `.onnx` under `~/.local/share/piper` (or `AARIA_PIPER_MODEL`). Toggle with `/voice on`.
+- **TUI `reconnecting…` / API exit with `write EPIPE`** — usually Piper/paplay pipe broke
+  under host memory pressure (not AARIA `mem 100%`, which is MEMORY.md budget). The API
+  now swallows EPIPE; still free RAM (Cursor/k3s) if the desk is thrashing.
+- **`mem 100%` in chat footer** — that is the **MEMORY.md character budget**, not host RAM.
+  Host pressure shows in heartbeat warnings / `free -h` / ops Health panel.
 
 ---
 
