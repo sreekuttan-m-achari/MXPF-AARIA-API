@@ -43,6 +43,16 @@ export function systemdServiceName(): string {
   return name && name.length > 0 ? name : "aria-api.service";
 }
 
+export function launchdLabel(): string {
+  const name = process.env.AARIA_LAUNCHD_LABEL?.trim();
+  return name && name.length > 0 ? name : "com.aaria.api";
+}
+
+/** Platform-specific background service name for loader / status text. */
+export function backgroundServiceName(): string {
+  return process.platform === "darwin" ? launchdLabel() : systemdServiceName();
+}
+
 export async function fetchHealth(): Promise<Health> {
   const res = await fetch(`${apiBase()}/health`, {
     signal: AbortSignal.timeout(3_000),
@@ -189,6 +199,48 @@ function startServerViaSystemd(): Promise<void> {
   });
 }
 
+function startServerViaLaunchd(): Promise<void> {
+  const label = launchdLabel();
+  const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+  const target = `gui/${uid}/${label}`;
+  return new Promise((resolve, reject) => {
+    const child = spawn("launchctl", ["kickstart", "-k", target], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (err) => {
+      reject(new Error(`failed to run launchctl: ${err.message}`));
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const detail = stderr.trim();
+      reject(
+        new Error(
+          detail
+            ? `launchctl kickstart ${target}: ${detail}`
+            : `launchctl kickstart ${target} failed (exit ${code})`,
+        ),
+      );
+    });
+  });
+}
+
+function startBackgroundService(): Promise<void> {
+  if (process.platform === "darwin") {
+    return startServerViaLaunchd();
+  }
+  return startServerViaSystemd();
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -198,7 +250,7 @@ export type EnsureOptions = {
   onWaiting?: () => void;
 };
 
-/** Ensure the ARIA API is up; starts the systemd user service once if needed. */
+/** Ensure the ARIA API is up; starts the OS background service once if needed. */
 export async function ensureServerReady(
   options: EnsureOptions = {},
 ): Promise<{
@@ -217,7 +269,7 @@ export async function ensureServerReady(
   options.onStarting?.();
 
   try {
-    await startServerViaSystemd();
+    await startBackgroundService();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(

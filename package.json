@@ -18,6 +18,7 @@
     "install-cli:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-cli.ps1",
     "install-service": "bash deploy/install-service.sh",
     "install-service:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-service.ps1",
+    "install-voice": "bash deploy/install-voice.sh",
     "install-heartbeat": "bash deploy/install-heartbeat-timer.sh",
     "install-heartbeat:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-heartbeat-timer.ps1",
     "install": "bash deploy/install-upgrade.sh",

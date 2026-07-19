@@ -189,9 +189,11 @@ check_node_version() {
 
 check_user_systemd() {
   if [[ "$OS_FAMILY" == "macos" ]]; then
-    warn "macOS detected — systemd user services are Linux-only"
-    warn "  After install, run the API with: npm start"
-    warn "  (launchd plist install is not provided yet)"
+    if command -v launchctl >/dev/null 2>&1; then
+      ok "macOS launchd available (LaunchAgent install supported)"
+      return 0
+    fi
+    warn "launchctl not found — background service install will be skipped"
     PREREQ_WARNINGS=$((PREREQ_WARNINGS + 1))
     return 1
   fi
@@ -237,6 +239,66 @@ check_path_local_bin() {
   return 1
 }
 
+# Local TTS (Piper + Cori). Soft warning unless AARIA_VOICE=1 is already set.
+check_voice_tts() {
+  export PATH="${HOME}/.local/bin:${PATH}"
+  local piper_ok=0 model_ok=0 player_ok=0
+  local model="${HOME}/.local/share/piper/en_GB-cori-medium.onnx"
+  local configured_model=""
+
+  if [[ -f "$ROOT/.env" ]]; then
+    configured_model="$(env_get AARIA_PIPER_MODEL 2>/dev/null || true)"
+    if [[ -n "$configured_model" && -f "$configured_model" ]]; then
+      model="$configured_model"
+    fi
+  fi
+
+  if command -v piper >/dev/null 2>&1; then
+    piper_ok=1
+  fi
+  if [[ -f "$model" ]]; then
+    model_ok=1
+  fi
+  if command -v paplay >/dev/null 2>&1 || \
+     command -v pw-play >/dev/null 2>&1 || \
+     command -v aplay >/dev/null 2>&1 || \
+     command -v afplay >/dev/null 2>&1; then
+    player_ok=1
+  fi
+
+  if [[ "$piper_ok" -eq 1 && "$model_ok" -eq 1 && "$player_ok" -eq 1 ]]; then
+    ok "Voice TTS ready (piper + Cori model + audio player)"
+    return 0
+  fi
+
+  local missing=()
+  [[ "$piper_ok" -eq 0 ]] && missing+=("piper")
+  [[ "$model_ok" -eq 0 ]] && missing+=("Cori model")
+  [[ "$player_ok" -eq 0 ]] && missing+=("audio player")
+  warn "Voice TTS incomplete — missing: ${missing[*]}"
+  warn "  Install with: bash deploy/install-voice.sh"
+  PREREQ_WARNINGS=$((PREREQ_WARNINGS + 1))
+
+  # Offer install when interactive and something is missing.
+  if [[ -t 0 || -t 1 ]] && [[ -r /dev/tty ]]; then
+    if prompt_yn "Install Piper TTS + Cori voice now?" "y"; then
+      if bash "$ROOT/deploy/install-voice.sh"; then
+        export PATH="${HOME}/.local/bin:${PATH}"
+        if command -v piper >/dev/null 2>&1 && [[ -f "${HOME}/.local/share/piper/en_GB-cori-medium.onnx" ]]; then
+          ok "Voice TTS installed"
+          if [[ "$PREREQ_WARNINGS" -gt 0 ]]; then
+            PREREQ_WARNINGS=$((PREREQ_WARNINGS - 1))
+          fi
+          return 0
+        fi
+      else
+        warn "Voice install failed — chat still works without TTS"
+      fi
+    fi
+  fi
+  return 1
+}
+
 run_prerequisite_checks() {
   step "Step 1 · Prerequisites"
   hr
@@ -248,6 +310,7 @@ run_prerequisite_checks() {
   check_user_systemd || true
   check_port_8788 || true
   check_path_local_bin || true
+  check_voice_tts || true
 
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   if [[ -s "$NVM_DIR/nvm.sh" ]]; then
@@ -643,16 +706,55 @@ cleanup_for_reinstall() {
   ok "Cleanup complete — local config untouched"
 }
 
-# ── systemd service ───────────────────────────────────────────────────────────
+# ── background service (systemd on Linux · launchd on macOS) ─────────────────
+
+macos_launchd_label() {
+  printf '%s' "${AARIA_LAUNCHD_LABEL:-com.aaria.api}"
+}
+
+macos_launchd_plist() {
+  printf '%s' "${HOME}/Library/LaunchAgents/$(macos_launchd_label).plist"
+}
+
+macos_launchd_domain() {
+  printf 'gui/%s' "$(id -u)"
+}
 
 install_systemd_service() {
   step "Step 7 · background service (aria-api)"
   hr
 
   if [[ "$OS_FAMILY" == "macos" ]]; then
-    warn "Skipping systemd install on macOS (no systemd / launchd template yet)"
-    info "Start the API in another terminal: npm start"
-    info "Then run: aaria"
+    local label plist
+    label="$(macos_launchd_label)"
+    plist="$(macos_launchd_plist)"
+
+    if [[ "$MODE" == "reinstall" ]]; then
+      if [[ -f "$plist" ]]; then
+        info "Existing LaunchAgent ${label} found — refreshing & restarting…"
+      elif ! prompt_yn "No LaunchAgent yet — install ${label} now?" "y"; then
+        info "Skipped launchd install — run manually: npm start"
+        return 0
+      fi
+    elif ! prompt_yn "Install / update LaunchAgent (${label})?" "y"; then
+      info "Skipped launchd install — run manually: npm start"
+      return 0
+    fi
+
+    if lsof -nP -iTCP:8788 -sTCP:LISTEN >/dev/null 2>&1; then
+      warn "Port 8788 is in use — stop a manual 'npm start' before loading LaunchAgent"
+      if ! prompt_yn "Continue and let launchd try anyway?" "y"; then
+        return 0
+      fi
+    fi
+
+    bash "$ROOT/deploy/install-service.sh" || {
+      warn "LaunchAgent install had issues"
+      warn "Try: bash deploy/install-service.sh"
+      warn "Logs: ~/Library/Logs/aaria/aria-api.err.log"
+      return 0
+    }
+    ok "LaunchAgent ${label} installed"
     return 0
   fi
 
@@ -784,9 +886,32 @@ run_self_check() {
   fi
 
   # Service
-  if systemctl --user show-environment >/dev/null 2>&1; then
+  local service_active=0
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    local label domain
+    label="$(macos_launchd_label)"
+    domain="$(macos_launchd_domain)"
+    if launchctl print "${domain}/${label}" >/dev/null 2>&1; then
+      ok "LaunchAgent ${label} is loaded"
+      service_active=1
+    else
+      local plist
+      plist="$(macos_launchd_plist)"
+      if [[ -f "$plist" ]]; then
+        warn "LaunchAgent plist exists but is not loaded"
+        info "Try: bash deploy/install-service.sh"
+        if [[ "$MODE" == "reinstall" ]]; then
+          self_check_fail "LaunchAgent ${label} not loaded after reinstall"
+        fi
+      else
+        warn "LaunchAgent ${label} not installed — skipped service check"
+        info "Install with: bash deploy/install-service.sh"
+      fi
+    fi
+  elif systemctl --user show-environment >/dev/null 2>&1; then
     if systemctl --user is-active aria-api.service >/dev/null 2>&1; then
       ok "aria-api.service is active"
+      service_active=1
     else
       warn "aria-api.service is not active"
       info "Try: systemctl --user start aria-api.service"
@@ -801,7 +926,7 @@ run_self_check() {
 
   # HTTP health
   local health_tries=15
-  if ! systemctl --user is-active aria-api.service >/dev/null 2>&1; then
+  if [[ "$service_active" -ne 1 ]]; then
     health_tries=3
   fi
   info "Waiting for ${health_url}…"
@@ -820,11 +945,15 @@ run_self_check() {
       self_check_fail "health response did not report ok:true"
     fi
   else
-    if [[ "$MODE" == "reinstall" ]] && systemctl --user is-active aria-api.service >/dev/null 2>&1; then
+    if [[ "$MODE" == "reinstall" && "$service_active" -eq 1 ]]; then
       self_check_fail "Could not reach $health_url (service claims active)"
     else
       warn "Could not reach $health_url"
-      warn "Start manually: systemctl --user start aria-api.service  OR  npm start"
+      if [[ "$OS_FAMILY" == "macos" ]]; then
+        warn "Start manually: bash deploy/install-service.sh  OR  npm start"
+      else
+        warn "Start manually: systemctl --user start aria-api.service  OR  npm start"
+      fi
     fi
   fi
 
@@ -847,9 +976,13 @@ print_summary() {
   api_url="$(env_get_or AARIA_API_URL http://127.0.0.1:8788)"
   local service_lines=""
   if [[ "$OS_FAMILY" == "macos" ]]; then
+    local label domain
+    label="$(macos_launchd_label)"
+    domain="$(macos_launchd_domain)"
     service_lines=$(cat <<EOF
-  ${BOLD}API${RESET}          npm start
   ${BOLD}Health${RESET}       curl -s ${api_url}/health | python3 -m json.tool
+  ${BOLD}Service${RESET}      launchctl print ${domain}/${label}
+  ${BOLD}Logs${RESET}         tail -f ~/Library/Logs/aaria/aria-api.err.log
 EOF
 )
   else
@@ -873,7 +1006,7 @@ ${DIM}Reinstall:${RESET}     bash deploy/install-upgrade.sh --reinstall
 EOF
   if [[ "$OS_FAMILY" == "macos" ]]; then
     cat <<EOF
-${YELLOW}macOS tip:${RESET} systemd is Linux-only — keep the API up with ${BOLD}npm start${RESET} (or add your own launchd plist).
+${YELLOW}macOS tip:${RESET} background API is LaunchAgent ${BOLD}$(macos_launchd_label)${RESET} (install: bash deploy/install-service.sh).
 ${YELLOW}PATH tip:${RESET} ensure ~/.local/bin is on PATH (zsh: ~/.zshrc).
 EOF
   else

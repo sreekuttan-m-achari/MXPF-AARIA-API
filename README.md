@@ -72,7 +72,7 @@ Persona is data-driven — edit `SOUL.md` (who she is), `USER.md` (who you are),
 | **Fleet** | *(planned)* `src/fleet/*` | MQTT bridge to ASTRA minions (HiveMQ default) |
 | **MCP** | `src/config/mcp.ts` | Loads `.cursor/mcp.json` tool servers |
 | **TUI** | `src/tui/*.ts` | `aaria` terminal client (REPL, completion, auto-start) |
-| **Deploy** | `deploy/*`, `bin/aaria` | systemd unit + CLI installer |
+| **Deploy** | `deploy/*`, `bin/aaria` | systemd / LaunchAgent / Windows task + CLI installer |
 
 ### API endpoints (default `http://127.0.0.1:8788`)
 
@@ -181,37 +181,36 @@ aaria                           # opens the TUI (auto-starts the service if down
 
 ### 2a-mac. Run on macOS (host)
 
-Same guided installer as Linux. **There is no systemd on macOS** — run the API in the
-foreground (or your own launchd/plist); the installer skips the service step automatically.
+Same guided installer as Linux. On macOS the background API is a **LaunchAgent**
+(`com.aaria.api`) instead of systemd.
 
-Requires **Node.js ≥ 22.13** (nvm recommended), and `~/.local/bin` on PATH (zsh):
+Requires **Node.js ≥ 22.13** (nvm or Homebrew), and `~/.local/bin` on PATH (zsh):
 
 ```bash
-# Guided install (recommended)
+# Guided install (recommended) — installs LaunchAgent in Step 7
 bash deploy/install-upgrade.sh
 # or: npm run install
 
 # Or step by step:
-nvm install && nvm use
 npm install
 cp .env-sample .env             # set CURSOR_API_KEY
 cp SOUL.sample.md SOUL.md
 cp USER.sample.md USER.md
 cp MEMORY.sample.md MEMORY.md
 npm run install-cli             # aaria → ~/.local/bin
+bash deploy/install-service.sh  # LaunchAgent com.aaria.api
 
 # PATH for zsh (default shell on modern macOS)
 grep -q '.local/bin' ~/.zshrc 2>/dev/null || \
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 
-# Terminal 1 — API
-npm start                       # → http://127.0.0.1:8788
-
-# Terminal 2 — TUI
+# TUI (auto-starts LaunchAgent if the API is down)
 aaria
 
 curl -s http://127.0.0.1:8788/health | python3 -m json.tool
+launchctl print gui/$(id -u)/com.aaria.api
+tail -f ~/Library/Logs/aaria/aria-api.err.log
 ```
 
 Reinstall without touching local config:
@@ -221,7 +220,7 @@ bash deploy/install-upgrade.sh --reinstall
 ```
 
 > **Note:** `install-service.sh` / `install-heartbeat-timer.sh` are Linux/systemd only.
-> On macOS use `npm start` and the in-process job scheduler (or a cron `curl` to `/jobs/run`).
+> On macOS the in-process job scheduler covers heartbeats; optional: cron `curl` to `/jobs/run`.
 > See `deploy/README.md` for the full platform matrix.
 
 ### 2a-win. Run on Windows (host)
@@ -250,15 +249,16 @@ aaria                          # TUI (new terminal after PATH update)
 |-------|-------|---------|
 | `bash deploy/install-upgrade.sh` | same | `npm run install:win` |
 | `bash deploy/install-upgrade.sh --reinstall` | same | `npm run install:reinstall:win` |
-| `bash deploy/install-service.sh` | `npm start` | `npm run install-service:win` |
+| `bash deploy/install-service.sh` | same (LaunchAgent) | `npm run install-service:win` |
 | `bash deploy/install-heartbeat-timer.sh` | in-process / cron | `npm run install-heartbeat:win` |
 | `npm run install-cli` | same | `npm run install-cli:win` |
-| `systemctl --user start aria-api.service` | `npm start` | `Start-ScheduledTask -TaskName ARIA-API` |
-| `journalctl --user -u aria-api.service -f` | terminal running `npm start` | Task Scheduler → **ARIA-API** |
+| `systemctl --user start aria-api.service` | `launchctl kickstart -k gui/$(id -u)/com.aaria.api` | `Start-ScheduledTask -TaskName ARIA-API` |
+| `journalctl --user -u aria-api.service -f` | `tail -f ~/Library/Logs/aaria/aria-api.err.log` | Task Scheduler → **ARIA-API** |
 | `~/.local/bin` on PATH | `~/.local/bin` in `~/.zshrc` | `%USERPROFILE%\.local\bin` on user PATH |
 
-> **Note:** The TUI's auto-start of `aria-api.service` is Linux/systemd only. On macOS and
-> Windows, start the API first (`npm start` or the Windows scheduled task) before `aaria`.
+> **Note:** The TUI auto-starts the background service when the API is down — systemd on
+> Linux, LaunchAgent `com.aaria.api` on macOS, and the Windows scheduled task after
+> `install-service:win`.
 
 ### 2b. Run with Docker
 
@@ -342,11 +342,18 @@ The API speaks a **short done** line when an interactive chat turn finishes (TUI
 
 Backends (auto-detected):
 
-1. **Piper** — if `piper` is on `PATH`, a `.onnx` model is found, and `paplay` / `pw-play` / `aplay` is available
+1. **Piper** — if `piper` is on `PATH`, a `.onnx` model is found, and `paplay` / `pw-play` / `aplay` / `afplay` (macOS) is available
 2. **`spd-say`** — Speech Dispatcher (`en-GB` preferred)
 3. Off — chat still works
 
-Download Cori (recommended):
+Install Piper + Cori (recommended — also offered by `install-upgrade.sh` prerequisites):
+
+```bash
+bash deploy/install-voice.sh
+# or: npm run install-voice
+```
+
+Manual Cori download (if you already have `piper` on PATH):
 
 ```bash
 mkdir -p ~/.local/share/piper && cd ~/.local/share/piper
@@ -479,6 +486,8 @@ MXPF-AARIA-API/
 ├── deploy/
 │   ├── README.md               # Linux / macOS / Windows deploy matrix
 │   ├── aria-api.service.in     # systemd user-unit template (Linux)
+│   ├── com.aaria.api.plist.in  # LaunchAgent template (macOS)
+│   ├── aaria-api-launch.sh     # LaunchAgent entrypoint (loads .env)
 │   ├── aria-api.launch.cmd.in  # API launch template (Windows)
 │   ├── aria-heartbeat.*.in     # optional external heartbeat (Linux)
 │   ├── aria-heartbeat.invoke.cmd.in

@@ -2,7 +2,7 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { ensureServerReady, fetchHealth, resetSession, setVoiceMode, speakOnServer, systemdServiceName, warmVoiceEngine, type Health } from "./bootstrap.js";
+import { ensureServerReady, fetchHealth, resetSession, setVoiceMode, speakOnServer, backgroundServiceName, warmVoiceEngine, type Health } from "./bootstrap.js";
 import { AriaWsClient } from "./client.js";
 import {
   completeLine,
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
   let startedService = false;
   try {
     const ready = await ensureServerReady({
-      onStarting: () => loader.setPhase(`booting ${systemdServiceName()}`),
+      onStarting: () => loader.setPhase(`booting ${backgroundServiceName()}`),
       onWaiting: () => loader.setPhase("warming systems"),
     });
     health = ready.health;
@@ -160,7 +160,7 @@ async function main(): Promise<void> {
     loader.stop();
     printBanner(health);
     if (startedService) {
-      output.write(`${c.dim}started aria-api.service${c.reset}\n`);
+      output.write(`${c.dim}started ${backgroundServiceName()}${c.reset}\n`);
     }
     const greeting = ready.greeting || health.greeting;
     if (greeting?.trim()) {

@@ -174,7 +174,8 @@ function findOnnxRecursive(dir: string, depth: number): string | null {
 }
 
 function findPlayer(): string | null {
-  return which("paplay") ?? which("pw-play") ?? which("aplay");
+  // Linux: Pulse/PipeWire/ALSA. macOS: afplay (WAV path only).
+  return which("paplay") ?? which("pw-play") ?? which("aplay") ?? which("afplay");
 }
 
 function canUsePiper(): { model: string; player: string } | null {
@@ -423,7 +424,9 @@ export function initTts(): TtsEngine {
   }
 
   if (probe.engine === "piper") {
-    const mode = piperPreferWav() ? "wav" : "stream";
+    const playerName = (probe.player ?? "").split("/").pop() ?? "";
+    const mode =
+      piperPreferWav() || playerName === "afplay" ? "wav" : "stream";
     console.error(
       `[aria-voice] engine=piper model=${probe.piperModel} player=${probe.player} mode=${mode} length_scale=${piperLengthScale()} sentence_silence=${piperSentenceSilence()}s`,
     );
@@ -575,7 +578,9 @@ function speakPiperWav(text: string, model: string, playerBin: string): void {
 }
 
 function speakPiper(text: string, model: string, playerBin: string): void {
-  if (piperPreferWav()) {
+  const playerName = playerBin.split("/").pop() ?? playerBin;
+  // afplay cannot consume raw PCM on stdin — always use a temp WAV.
+  if (piperPreferWav() || playerName === "afplay") {
     speakPiperWav(text, model, playerBin);
   } else {
     speakPiperRaw(text, model, playerBin);
