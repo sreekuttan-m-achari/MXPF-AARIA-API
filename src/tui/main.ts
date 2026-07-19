@@ -9,17 +9,19 @@ import {
   isBuiltinCommand,
   isMemoryCommand,
   isBareSkillCommand,
+  isSkillCommand,
   isSkillsCommand,
   isVoiceCommand,
   looksLikeCommand,
   matchCommands,
+  parseSkillCommand,
   SLASH_COMMANDS,
 } from "./commands.js";
 import { TurnActivity } from "./activity.js";
 import { apiBase } from "./config.js";
 import { BootLoader } from "./loader.js";
 import { createPasteAwareInput, flushStdin } from "./paste-input.js";
-import { opsEnabled, pushChatHistory, runOpsMode } from "./ops/index.js";
+import { clearChatHistory, opsEnabled, pushChatHistory, runOpsMode } from "./ops/index.js";
 import { agentPrefix, ariaWordmark, c, formalTitleLine, learnTargetStyle, userPrefix } from "./theme.js";
 import { colorizeCommandLine, colorizeReplyChunk } from "./render.js";
 
@@ -38,7 +40,7 @@ ${commandHelpLines()}
 
 ${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for command suggestions · Tab to complete.
 Paste multiple lines as one message · end a line with \\ to continue on the next.
-${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (Fleet · Health · Jobs…) — set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable.
+${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (Health · Jobs · Memory · Chat · Cursor · Fleet) — set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable.
 Talk naturally for work tasks — code, DevOps, servers, planning.
 ${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 
@@ -325,6 +327,36 @@ async function main(): Promise<void> {
     }
   };
 
+  let announcedDisconnect = false;
+  client.onConnection((state, detail) => {
+    if (closed) {
+      return;
+    }
+    if (state === "reconnecting") {
+      announcedDisconnect = true;
+      if (opsOpen) {
+        return;
+      }
+      output.write(
+        `\n${c.warn}◌ reconnecting…${c.reset}${detail ? ` ${c.dim}${detail}${c.reset}` : ""}\n`,
+      );
+      if (!streaming) {
+        prompt();
+      }
+      return;
+    }
+    if (state === "connected" && announcedDisconnect) {
+      announcedDisconnect = false;
+      if (opsOpen) {
+        return;
+      }
+      output.write(`\n${c.ok}● uplink restored${c.reset}\n`);
+      if (!streaming) {
+        prompt();
+      }
+    }
+  });
+
   const finishTurn = (): void => {
     activeTurn?.end();
     activeTurn = undefined;
@@ -584,6 +616,14 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (isSkillCommand(text)) {
+        const loaded = await handleSkillLoadCommand(text);
+        if (!loaded) {
+          return;
+        }
+        // Fall through to chat with the original `/skill …` line (server expands).
+      }
+
       if (lower === "/cancel") {
         if (streaming && currentChatId) {
           client.cancel(currentChatId);
@@ -631,6 +671,7 @@ async function main(): Promise<void> {
         output.write(`${c.dim}starting fresh session…${c.reset}\n`);
         try {
           const result = await resetSession();
+          clearChatHistory();
           const sid = result.sessionId ?? "?";
           output.write(
             `${c.ok}new session${c.reset} ${c.dim}${sid}${c.reset}` +
@@ -683,6 +724,9 @@ async function main(): Promise<void> {
       turn.begin();
 
       try {
+        if (!client.connected) {
+          await client.ensureConnected();
+        }
         currentChatId = client.sendChat(text, {
           onChunk: (chunk) => {
             turn.onChunk(chunk);
@@ -852,6 +896,54 @@ async function main(): Promise<void> {
       const msg = err instanceof Error ? err.message : String(err);
       output.write(`${c.err}${msg}${c.reset}\n\n`);
       prompt();
+    }
+  }
+
+  async function handleSkillLoadCommand(text: string): Promise<boolean> {
+    const parsed = parseSkillCommand(text);
+    if (!parsed) {
+      output.write(
+        `${c.warn}usage:${c.reset} ${c.cmd}/skill <name> [prompt]${c.reset}\n\n`,
+      );
+      prompt();
+      return false;
+    }
+    try {
+      const res = await fetch(`${apiBase()}/skills`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) {
+        throw new Error(`/skills returned ${res.status}`);
+      }
+      const body = (await res.json()) as {
+        skills?: { count: number; names: string[]; path: string };
+      };
+      const names = body.skills?.names ?? [];
+      const match = names.find(
+        (n) => n.toLowerCase() === parsed.name.toLowerCase(),
+      );
+      if (!match) {
+        output.write(
+          `${c.err}unknown skill ${parsed.name}${c.reset}` +
+            (names.length
+              ? `${c.dim} — try: ${names.slice(0, 8).join(", ")}${names.length > 8 ? "…" : ""}${c.reset}`
+              : `${c.dim} — no skills installed${c.reset}`) +
+            `\n\n`,
+        );
+        prompt();
+        return false;
+      }
+      output.write(
+        `${c.dim}loading skill${c.reset} ${c.gold}${match}${c.reset}` +
+          (parsed.prompt ? `${c.dim} · ${parsed.prompt.slice(0, 60)}${parsed.prompt.length > 60 ? "…" : ""}${c.reset}` : "") +
+          `\n`,
+      );
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(`${c.err}${msg}${c.reset}\n\n`);
+      prompt();
+      return false;
     }
   }
 

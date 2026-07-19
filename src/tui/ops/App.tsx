@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 
 import type { Health } from "../bootstrap.js";
@@ -123,22 +123,40 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
     }
   }, [panel, jobs.length, pending.length, chat.length, fleetAgents.length]);
 
+  const pollTick = useRef(0);
+
   const refresh = useCallback(async () => {
     try {
+      pollTick.current += 1;
+      const tick = pollTick.current;
+      // Cursor/Fleet are heavier — fetch every tick on that panel, else sparsely.
+      const wantCursor = panel === "cursor" || tick % 3 === 1;
+      const wantFleet = panel === "fleet" || tick % 2 === 1;
+
       const [h, snapshot, j, p, cur, fl] = await Promise.all([
         fetchOpsHealth(),
         fetchHeartbeat(),
         fetchJobs(),
         fetchPending(),
-        fetchCursorStatus(),
-        fetchFleet().catch(() => null),
+        wantCursor ? fetchCursorStatus() : Promise.resolve(null),
+        wantFleet
+          ? fetchFleet().catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              setStatus(`fleet: ${msg}`);
+              return null;
+            })
+          : Promise.resolve(undefined),
       ]);
       setHealth(h);
       setHb(snapshot);
       setJobs(j);
       setPending(p);
-      setCursor(cur);
-      setFleet(fl);
+      if (cur) {
+        setCursor(cur);
+      }
+      if (fl !== undefined) {
+        setFleet(fl);
+      }
       setChat(listChatHistory());
       if (snapshot) {
         setMemSeries((prev) => {
@@ -156,13 +174,13 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
       const msg = err instanceof Error ? err.message : String(err);
       setStatus(`error: ${msg}`);
     }
-  }, []);
+  }, [panel]);
 
   useEffect(() => {
     void refresh();
     const id = setInterval(() => {
       void refresh();
-    }, 1000);
+    }, 2500);
     return () => clearInterval(id);
   }, [refresh]);
 
@@ -176,7 +194,15 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
   }, [listLen]);
 
   const doAction = useCallback(
-    async (action: "run" | "approve" | "reject" | "fleet-approve" | "fleet-health") => {
+    async (
+      action:
+        | "run"
+        | "approve"
+        | "approve-all"
+        | "reject"
+        | "fleet-approve"
+        | "fleet-health",
+    ) => {
       if (busy) {
         return;
       }
@@ -187,6 +213,11 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
           setStatus(`running job ${id}…`);
           await runJob(id);
           setStatus(`ran ${id}`);
+          await refresh();
+        } else if (action === "approve-all" && panel === "memory" && pending.length > 0) {
+          setStatus("approving all…");
+          await approvePending("all");
+          setStatus("approved all");
           await refresh();
         } else if (panel === "memory" && pending[listIdx]) {
           const id = pending[listIdx]!.id;
@@ -199,11 +230,6 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
             await rejectPending(id);
             setStatus(`rejected ${id}`);
           }
-          await refresh();
-        } else if (panel === "memory" && action === "approve" && pending.length > 0) {
-          setStatus("approving all…");
-          await approvePending("all");
-          setStatus("approved all");
           await refresh();
         } else if (panel === "fleet" && fleetAgents[listIdx]) {
           const agent = fleetAgents[listIdx]!;
@@ -231,6 +257,10 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
 
   useInput((input, key) => {
     if (key.ctrl && input === "o") {
+      exit();
+      return;
+    }
+    if (key.ctrl && input === "c") {
       exit();
       return;
     }
@@ -282,6 +312,10 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
       void doAction("run");
       return;
     }
+    if (input === "A" && panel === "memory") {
+      void doAction("approve-all");
+      return;
+    }
     if (input === "a" && panel === "memory") {
       void doAction("approve");
       return;
@@ -306,12 +340,12 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
   });
 
   const hints = useMemo(() => {
-    const base = "1-6 panels · ←/→ tabs · ↑/↓ list · q exit";
+    const base = "1-6 panels · ←/→ tabs · ↑/↓ list · q/Ctrl+C exit";
     if (panel === "jobs") {
       return `${base} · r run job`;
     }
     if (panel === "memory") {
-      return `${base} · a approve · x reject`;
+      return `${base} · a approve · A all · x reject`;
     }
     if (panel === "fleet") {
       return `${base} · a approve · h health`;
@@ -744,7 +778,7 @@ function MemoryView(props: {
     return (
       <Box flexDirection="column">
         <Text>Pending learn entries staged when AARIA_LEARN_APPROVAL=1.</Text>
-        <Text dimColor>a = approve selected · x = reject selected</Text>
+        <Text dimColor>a = approve selected · A = approve all · x = reject selected</Text>
         <Text dimColor>Chat slash cmds still work in light mode: /memory …</Text>
       </Box>
     );

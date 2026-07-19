@@ -122,8 +122,22 @@ export function isBuiltinCommand(text: string): boolean {
   if (isBareSkillCommand(trimmed)) {
     return true;
   }
+  if (isSkillCommand(trimmed)) {
+    return true;
+  }
   if (isVoiceCommand(trimmed)) {
     return true;
   }
   return looksLikeCommand(trimmed);
+}
+
+/** Parse `/skill <name> [prompt]` — returns null if not a skill load command. */
+export function parseSkillCommand(
+  text: string,
+): { name: string; prompt: string } | null {
+  const match = text.trim().match(/^\/skill\s+(\S+)(?:\s+([\s\S]*))?$/i);
+  if (!match) {
+    return null;
+  }
+  return { name: match[1]!, prompt: match[2]?.trim() ?? "" };
 }

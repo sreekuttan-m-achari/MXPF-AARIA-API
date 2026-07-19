@@ -468,12 +468,18 @@ Built-in commands (type `/` for live suggestions, `Tab` to complete):
 |---------|-------------|
 | `/help` | Show help |
 | `/health` | Backend status |
-| `/ops` | Ops overlay (Health / Jobs / Memory / Chat) — also **Ctrl+O**; set `AARIA_OPS=0` to disable |
+| `/ops` | Ops overlay (Health / Jobs / Memory / Chat / Cursor / Fleet) — also **Ctrl+O**; set `AARIA_OPS=0` to disable |
+| `/memory` | Learn loop (`pending` · `approve` · `reject` · `curate`) |
+| `/skills` | List installed skills |
+| `/skill <name> [prompt]` | Load a skill for this turn |
+| `/voice` | Voice on/off (`/voice` · `on` · `off`) |
+| `/new` (`/reset`) | Fresh Cursor session (clears ops chat history) |
 | `/cancel` | Cancel the current reply |
 | `/quit` (`/exit`, `Ctrl+D`) | Exit |
 
 Anything else is sent to AARIA as a work request. If the API isn't running, the TUI
 auto-starts `aria-api.service` and waits for it to warm up (host installs only).
+If the WebSocket drops, the TUI reconnects automatically.
 
 ---
 
