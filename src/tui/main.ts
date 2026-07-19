@@ -535,7 +535,7 @@ async function main(): Promise<void> {
     options?: { alreadyDisplayed?: boolean },
   ): Promise<void> {
     const lower = text.toLowerCase();
-      if (lower === "/quit" || lower === "/exit") {
+      if (lower === "/quit" || lower === "/exit" || lower === "/q") {
         output.write(`${c.dim}bye${c.reset}\n`);
         closed = true;
         client.close();

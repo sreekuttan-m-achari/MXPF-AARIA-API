@@ -21,7 +21,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     aliases: ["/reset"],
     summary: "Start a fresh Cursor session (unstick a frozen agent)",
   },
-  { name: "/quit", aliases: ["/exit"], summary: "Exit (also /exit, Ctrl+D)" },
+  { name: "/quit", aliases: ["/exit", "/q"], summary: "Exit (also /q, /exit, Ctrl+D)" },
 ];
 
 /** Every invokable token, including aliases — used for tab completion. */
@@ -101,6 +101,7 @@ const EXACT_COMMANDS = new Set([
   "/reset",
   "/quit",
   "/exit",
+  "/q",
 ]);
 
 /** True for built-in slash commands (exact or /memory …). */

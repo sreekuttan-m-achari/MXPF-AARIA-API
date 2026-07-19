@@ -499,7 +499,7 @@ Built-in commands (type `/` for live suggestions, `Tab` to complete):
 | `/voice` | Voice on/off (`/voice` · `on` · `off`) |
 | `/new` (`/reset`) | Fresh Cursor session (clears ops chat history) |
 | `/cancel` | Cancel the current reply |
-| `/quit` (`/exit`, `Ctrl+D`) | Exit |
+| `/quit` (`/q`, `/exit`, `Ctrl+D`) | Exit |
 
 Anything else is sent to AARIA as a work request. If the API isn't running, the TUI
 auto-starts `aria-api.service` and waits for it to warm up (host installs only).
