@@ -446,8 +446,8 @@ async function main(): Promise<void> {
     }
     const text =
       matches.length === 1
-        ? `${c.cmd}${matches[0].name}${c.reset} ${c.dim}— ${matches[0].summary}${c.reset}`
-        : matches.map((cmd) => `${c.cmd}${cmd.name}${c.reset}`).join("  ");
+        ? `${c.cmd}${commandLabel(matches[0]!)}${c.reset} ${c.dim}— ${matches[0]!.summary}${c.reset}`
+        : matches.map((cmd) => `${c.cmd}${commandLabel(cmd)}${c.reset}`).join("  ");
     output.write(`\x1b7\n\x1b[2K${c.dim}${text}${c.reset}\x1b8`);
     hintVisible = true;
   };
