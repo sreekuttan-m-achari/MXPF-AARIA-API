@@ -22,7 +22,15 @@ import { apiBase } from "./config.js";
 import { BootLoader } from "./loader.js";
 import { createPasteAwareInput, flushStdin } from "./paste-input.js";
 import { clearChatHistory, opsEnabled, pushChatHistory, runOpsMode } from "./ops/index.js";
-import { agentPrefix, ariaWordmark, c, formalTitleLine, learnTargetStyle, userPrefix } from "./theme.js";
+import {
+  agentPrefix,
+  ariaWordmark,
+  c,
+  formalTitleLine,
+  formatHeatStatusLine,
+  learnTargetStyle,
+  userPrefix,
+} from "./theme.js";
 import { colorizeCommandLine, colorizeReplyChunk } from "./render.js";
 
 function commandHelpLines(): string {
@@ -567,10 +575,10 @@ async function main(): Promise<void> {
           const ctx = h.context;
           let ctxLine = "";
           if (ctx) {
-            const w =
+            const ctxPct =
               ctx.window.percent != null && ctx.window.usedTokens != null
-                ? `ctx ${ctx.window.percent}% (${ctx.window.usedTokens}/${ctx.window.limitTokens})`
-                : `ctx —/${ctx.window.limitTokens}`;
+                ? ctx.window.percent
+                : null;
             const memPct = Math.round(
               (ctx.prompts.memoryChars / Math.max(1, ctx.prompts.memoryLimit)) * 100,
             );
@@ -579,7 +587,9 @@ async function main(): Promise<void> {
                 Math.max(1, ctx.prompts.userLearnedLimit)) *
                 100,
             );
-            ctxLine = `\n${c.dim}${w} · mem ${memPct}% · user ${userPct}% · standing ${ctx.prompts.standingChars}ch${c.reset}`;
+            ctxLine =
+              `\n${formatHeatStatusLine({ ctxPct, memPct, userPct })}` +
+              `${c.dim} · standing ${ctx.prompts.standingChars}ch${c.reset}`;
           }
           output.write(
             `${c.ok}${c.bold}ok${c.reset} warm=${warm} persona=${h.persona ? c.ok + "yes" : c.dim + "no"}${c.reset}${mem}${learn} mcp=${h.mcp?.loaded ? c.teal + h.mcp.servers.join(", ") : c.dim + "off"}${c.reset}${ctxLine}` +
@@ -739,11 +749,11 @@ async function main(): Promise<void> {
                 pushChatHistory("assistant", reply);
               }
               if (context) {
-                const w =
+                const ctxPct =
                   context.window.percent != null &&
                   context.window.usedTokens != null
-                    ? `ctx ${context.window.percent}%`
-                    : "ctx —";
+                    ? context.window.percent
+                    : null;
                 const memPct = Math.round(
                   (context.prompts.memoryChars /
                     Math.max(1, context.prompts.memoryLimit)) *
@@ -755,7 +765,7 @@ async function main(): Promise<void> {
                     100,
                 );
                 output.write(
-                  `\n${c.dim}${w} · mem ${memPct}% · user ${userPct}%${c.reset}`,
+                  `\n${formatHeatStatusLine({ ctxPct, memPct, userPct })}`,
                 );
               }
             });
