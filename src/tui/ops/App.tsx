@@ -12,6 +12,7 @@ import {
   fetchOpsHealth,
   fetchPending,
   fleetCmd,
+  fleetUpdate,
   rejectPending,
   runJob,
   type CursorStatus,
@@ -201,7 +202,9 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
         | "approve-all"
         | "reject"
         | "fleet-approve"
-        | "fleet-health",
+        | "fleet-health"
+        | "fleet-update"
+        | "fleet-update-all",
     ) => {
       if (busy) {
         return;
@@ -231,17 +234,43 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
             setStatus(`rejected ${id}`);
           }
           await refresh();
+        } else if (panel === "fleet" && action === "fleet-update-all") {
+          setStatus("updating all approved minions…");
+          const result = await fleetUpdate({ agentIds: "all" });
+          setStatus(
+            `update all · started ${result.started}/${result.targeted}` +
+              (result.failed ? ` · failed ${result.failed}` : ""),
+          );
+          await refresh();
         } else if (panel === "fleet" && fleetAgents[listIdx]) {
           const agent = fleetAgents[listIdx]!;
           if (action === "fleet-approve") {
             setStatus(`approving ${agent.agentId}…`);
-            await approveFleetAgent(agent.agentId, agent.labels, agent.caps.length ? agent.caps : ["health", "exec", "host"]);
+            await approveFleetAgent(
+              agent.agentId,
+              agent.labels,
+              agent.caps.length
+                ? agent.caps
+                : ["health", "exec", "host", "update"],
+            );
             setStatus(`approved ${agent.agentId}`);
             await refresh();
           } else if (action === "fleet-health") {
             setStatus(`health → ${agent.agentId}…`);
             const { jobId } = await fleetCmd(agent.agentId, "health", {});
             setStatus(`health job ${jobId.slice(0, 8)}…`);
+            await refresh();
+          } else if (action === "fleet-update") {
+            setStatus(`update → ${agent.agentId}…`);
+            const result = await fleetUpdate({
+              agentIds: [agent.agentId],
+            });
+            const job = result.jobs[0];
+            setStatus(
+              job?.jobId
+                ? `update job ${job.jobId.slice(0, 8)}… (${job.action})`
+                : `update failed: ${job?.error ?? "unknown"}`,
+            );
             await refresh();
           }
         }
@@ -332,6 +361,14 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
       void doAction("fleet-health");
       return;
     }
+    if (input === "u" && panel === "fleet") {
+      void doAction("fleet-update");
+      return;
+    }
+    if (input === "U" && panel === "fleet") {
+      void doAction("fleet-update-all");
+      return;
+    }
     if (key.tab) {
       const idx = PANELS.indexOf(panel);
       const delta = key.shift ? -1 : 1;
@@ -348,7 +385,7 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
       return `${base} · a approve · A all · x reject`;
     }
     if (panel === "fleet") {
-      return `${base} · a approve · h health`;
+      return `${base} · a approve · h health · u update · U update all`;
     }
     return base;
   }, [panel]);
@@ -614,7 +651,7 @@ function FleetView(props: {
         <Box marginTop={1}>
           <Text dimColor>
             {agent.status === "pending" ? "a = approve · " : ""}
-            h = health check
+            h = health · u = update · U = update all
           </Text>
         </Box>
       </Box>

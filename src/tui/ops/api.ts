@@ -235,6 +235,29 @@ export async function fleetCmd(
   return postJson<{ jobId: string }>("/fleet/cmd", { agentId, action, args });
 }
 
+export type FleetUpdateResult = {
+  ok: boolean;
+  targeted: number;
+  started: number;
+  failed: number;
+  jobs: Array<{
+    agentId: string;
+    name?: string;
+    jobId?: string;
+    action?: string;
+    error?: string;
+  }>;
+};
+
+export async function fleetUpdate(opts: {
+  agentIds?: string[] | "all";
+  refreshHost?: boolean;
+  reinstall?: boolean;
+  skipPull?: boolean;
+}): Promise<FleetUpdateResult> {
+  return postJson<FleetUpdateResult>("/fleet/update", opts);
+}
+
 export function opsEnabled(): boolean {
   const raw = process.env.AARIA_OPS?.trim().toLowerCase();
   if (raw === "0" || raw === "false" || raw === "off" || raw === "no") {

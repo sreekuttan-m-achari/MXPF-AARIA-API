@@ -18,6 +18,12 @@ import {
 import { currentTaskLabel, fleetPresence, resolveLastSeen } from "./presence.js";
 import { topics } from "./topics.js";
 import type { FleetBus } from "./bus.js";
+import {
+  dispatchArgsForAgent,
+  resolveUpdateTargets,
+  type FleetUpdateOptions,
+  type FleetUpdateResult,
+} from "./update.js";
 
 export type FleetAgentView = AgentRecord & {
   presence: ReturnType<typeof fleetPresence>;
@@ -39,7 +45,7 @@ export async function listFleetAgentsView(): Promise<FleetAgentView[]> {
   return agents.map(toFleetAgentView);
 }
 
-const DEFAULT_APPROVE_CAPS = ["health", "exec", "host"];
+const DEFAULT_APPROVE_CAPS = ["health", "exec", "host", "update"];
 
 export type FleetBridge = {
   bus: FleetBus;
@@ -54,6 +60,7 @@ export type FleetBridge = {
     action: string,
     args?: Record<string, unknown>,
   ) => Promise<{ jobId: string }>;
+  updateAgents: (opts?: FleetUpdateOptions) => Promise<FleetUpdateResult>;
   stop: () => Promise<void>;
 };
 
@@ -139,6 +146,30 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
 
   console.error("[fleet] bridge subscribed");
 
+  const dispatchCmd = async (
+    agentId: string,
+    action: string,
+    args: Record<string, unknown> = {},
+  ): Promise<{ jobId: string }> => {
+    const agent = await getAgent(agentId);
+    if (!agent || agent.status !== "approved") {
+      throw new Error(`agent not approved: ${agentId}`);
+    }
+    const jobId = crypto.randomUUID();
+    const summary =
+      action === "exec" && typeof args.cmd === "string"
+        ? String(args.cmd).slice(0, 80)
+        : action === "host.profile" || action === "host"
+          ? "host profile"
+          : action === "self.update" || action === "update"
+            ? "self update"
+            : undefined;
+    await setCurrentJob(agentId, { jobId, action, summary });
+    const env = makeEnvelope("cmd.exec", agentId, { action, args }, jobId);
+    await bus.publish(topics.cmd(agentId), serializeEnvelope(env), 1);
+    return { jobId };
+  };
+
   return {
     bus,
     listAgents: listFleetAgentsView,
@@ -147,6 +178,9 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
       let nextCaps = caps ?? existing?.caps ?? DEFAULT_APPROVE_CAPS;
       if (existing?.host && !nextCaps.includes("host")) {
         nextCaps = [...nextCaps, "host"];
+      }
+      if (!nextCaps.includes("update")) {
+        nextCaps = [...nextCaps, "update"];
       }
       if (nextCaps.length === 0) {
         nextCaps = DEFAULT_APPROVE_CAPS;
@@ -171,22 +205,51 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
       console.error(`[fleet] approved ${agentId}`);
       return record;
     },
-    async dispatchCmd(agentId, action, args = {}) {
-      const agent = await getAgent(agentId);
-      if (!agent || agent.status !== "approved") {
-        throw new Error(`agent not approved: ${agentId}`);
+    dispatchCmd,
+    async updateAgents(opts: FleetUpdateOptions = {}) {
+      const { targets, missing } = await resolveUpdateTargets(opts);
+      const jobs: FleetUpdateResult["jobs"] = [];
+
+      for (const id of missing) {
+        jobs.push({ agentId: id, error: "unknown agent" });
       }
-      const jobId = crypto.randomUUID();
-      const summary =
-        action === "exec" && typeof args.cmd === "string"
-          ? String(args.cmd).slice(0, 80)
-          : action === "host.profile" || action === "host"
-            ? "host profile"
-            : undefined;
-      await setCurrentJob(agentId, { jobId, action, summary });
-      const env = makeEnvelope("cmd.exec", agentId, { action, args }, jobId);
-      await bus.publish(topics.cmd(agentId), serializeEnvelope(env), 1);
-      return { jobId };
+
+      for (const agent of targets) {
+        if (agent.status !== "approved") {
+          jobs.push({
+            agentId: agent.agentId,
+            name: agent.name,
+            error: `not approved (${agent.status})`,
+          });
+          continue;
+        }
+        try {
+          const { action, args } = dispatchArgsForAgent(agent, opts);
+          const { jobId } = await dispatchCmd(agent.agentId, action, args);
+          jobs.push({
+            agentId: agent.agentId,
+            name: agent.name,
+            jobId,
+            action,
+          });
+        } catch (err) {
+          jobs.push({
+            agentId: agent.agentId,
+            name: agent.name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      const started = jobs.filter((j) => j.jobId).length;
+      const failed = jobs.filter((j) => j.error).length;
+      return {
+        ok: failed === 0 && started > 0,
+        targeted: jobs.length,
+        started,
+        failed,
+        jobs,
+      };
     },
     async stop() {
       await bus.end();

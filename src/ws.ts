@@ -398,6 +398,53 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         return;
       }
 
+      if (req.method === "POST" && req.url === "/fleet/update") {
+        const bridge = getFleetBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "fleet disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const raw = body as {
+          agentIds?: string[] | "all" | string;
+          agentId?: string;
+          refreshHost?: boolean;
+          reinstall?: boolean;
+          skipPull?: boolean;
+        };
+        let agentIds: string[] | "all" | undefined;
+        if (raw.agentIds === "all" || raw.agentId === "all") {
+          agentIds = "all";
+        } else if (Array.isArray(raw.agentIds)) {
+          agentIds = raw.agentIds;
+        } else if (typeof raw.agentIds === "string" && raw.agentIds.trim()) {
+          agentIds = raw.agentIds.split(/[\s,]+/).filter(Boolean);
+        } else if (typeof raw.agentId === "string" && raw.agentId.trim()) {
+          agentIds = [raw.agentId.trim()];
+        } else {
+          agentIds = "all";
+        }
+        try {
+          const result = await bridge.updateAgents({
+            agentIds,
+            refreshHost: raw.refreshHost === true,
+            reinstall: raw.reinstall === true,
+            skipPull: raw.skipPull === true,
+          });
+          jsonResponse(res, 200, result);
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { ok: false, error });
+        }
+        return;
+      }
+
       if (req.method === "GET" && req.url === "/voice") {
         jsonResponse(res, 200, { ok: true, ...getVoiceStatus() });
         return;
@@ -737,7 +784,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   console.error(`[aria-server] ws://${host}:${port}`);
   console.error(`[aria-server] GET /health  GET /cursor  GET /heartbeat  GET /jobs  POST /jobs/run  POST /jobs/reload`);
   console.error(`[aria-server] GET /memory/pending  POST /memory/approve  POST /memory/reject  POST /memory/curate  GET /skills`);
-  console.error(`[aria-server] GET /fleet/health  GET /fleet/agents  POST /fleet/approve  POST /fleet/cmd`);
+  console.error(`[aria-server] GET /fleet/health  GET /fleet/agents  POST /fleet/approve  POST /fleet/cmd  POST /fleet/update`);
   console.error(`[aria-server] POST /voice/warmup  POST /voice/speak  GET|POST /voice  POST /chat  POST /chat/cancel  POST /chat/stream`);
   console.error(`[aria-server] POST /session/reset`);
 
