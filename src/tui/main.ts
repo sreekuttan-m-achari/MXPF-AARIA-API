@@ -5,6 +5,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { ensureServerReady, fetchHealth, resetSession, setVoiceMode, speakOnServer, backgroundServiceName, warmVoiceEngine, type Health } from "./bootstrap.js";
 import { AriaWsClient } from "./client.js";
 import {
+  commandLabel,
   completeLine,
   isBuiltinCommand,
   isMemoryCommand,
@@ -15,6 +16,7 @@ import {
   looksLikeCommand,
   matchCommands,
   parseSkillCommand,
+  resolveCommand,
   SLASH_COMMANDS,
 } from "./commands.js";
 import { TurnActivity } from "./activity.js";
@@ -35,7 +37,7 @@ import { colorizeCommandLine, colorizeReplyChunk } from "./render.js";
 
 function commandHelpLines(): string {
   return SLASH_COMMANDS.map((cmd) =>
-    colorizeCommandLine(cmd.name, cmd.summary),
+    colorizeCommandLine(commandLabel(cmd), cmd.summary),
   ).join("\n");
 }
 
@@ -542,8 +544,11 @@ async function main(): Promise<void> {
     text: string,
     options?: { alreadyDisplayed?: boolean },
   ): Promise<void> {
-    const lower = text.toLowerCase();
-      if (lower === "/quit" || lower === "/exit" || lower === "/q") {
+    const head = text.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+    const cmdName = resolveCommand(head)?.name;
+    let chatText = text;
+
+      if (cmdName === "/quit") {
         output.write(`${c.dim}bye${c.reset}\n`);
         closed = true;
         client.close();
@@ -551,13 +556,13 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (lower === "/help") {
+      if (cmdName === "/help") {
         printHelp();
         prompt();
         return;
       }
 
-      if (lower === "/health") {
+      if (cmdName === "/health") {
         try {
           const h = await fetchHealth();
           const mem =
@@ -606,7 +611,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (lower === "/ops") {
+      if (cmdName === "/ops") {
         await openOps();
         return;
       }
@@ -631,10 +636,17 @@ async function main(): Promise<void> {
         if (!loaded) {
           return;
         }
-        // Fall through to chat with the original `/skill …` line (server expands).
+        // Canonicalize `/sk …` → `/skill …` for the server expand path.
+        const parsed = parseSkillCommand(text);
+        if (parsed) {
+          chatText = parsed.prompt
+            ? `/skill ${parsed.name} ${parsed.prompt}`
+            : `/skill ${parsed.name}`;
+        }
+        // Fall through to chat with the skill line (server expands).
       }
 
-      if (lower === "/cancel") {
+      if (cmdName === "/cancel") {
         if (streaming && currentChatId) {
           client.cancel(currentChatId);
           output.write(`${c.dim}cancel requested${c.reset}\n`);
@@ -673,7 +685,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (lower === "/new" || lower === "/reset") {
+      if (cmdName === "/new") {
         if (streaming && currentChatId) {
           client.cancel(currentChatId);
           output.write(`${c.dim}cancelling current reply before reset…${c.reset}\n`);
@@ -724,10 +736,10 @@ async function main(): Promise<void> {
       suspendInput();
 
       // readline already echoed normal typed lines; only print for paste-draft sends.
-      if (!text.startsWith("/") && !options?.alreadyDisplayed) {
-        output.write(`\n${userPrefix(userName)}${text}\n`);
+      if (!chatText.startsWith("/") && !options?.alreadyDisplayed) {
+        output.write(`\n${userPrefix(userName)}${chatText}\n`);
       }
-      pushChatHistory("user", text);
+      pushChatHistory("user", chatText);
 
       const turn = new TurnActivity();
       activeTurn = turn;
@@ -737,7 +749,7 @@ async function main(): Promise<void> {
         if (!client.connected) {
           await client.ensureConnected();
         }
-        currentChatId = client.sendChat(text, {
+        currentChatId = client.sendChat(chatText, {
           onChunk: (chunk) => {
             turn.onChunk(chunk);
           },

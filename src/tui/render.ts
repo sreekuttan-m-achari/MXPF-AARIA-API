@@ -21,5 +21,6 @@ export function colorizeReplyChunk(text: string): string {
 }
 
 export function colorizeCommandLine(name: string, summary: string): string {
-  return `  ${c.cmd}${c.bold}${name.padEnd(10)}${c.reset}${c.dim}${summary}${c.reset}`;
+  // Wide enough for labels like `/health[/hl]` / `/skills[/ss]`.
+  return `  ${c.cmd}${c.bold}${name.padEnd(14)}${c.reset}${c.dim}${summary}${c.reset}`;
 }
