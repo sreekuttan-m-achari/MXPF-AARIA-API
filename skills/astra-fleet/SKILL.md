@@ -19,8 +19,10 @@ author: AARIA
 ## Operating rules
 
 1. **You are the brain by default.** Minions are executors. Do not assume `CURSOR_API_KEY` exists on the remote box.
-2. Read `FLEET.md` for agent IDs, labels, and capability packs before targeting work.
-3. Prefer structured actions the minion allowlists (`health`, sandboxed `exec`, optional `docker` / `nginx` / `k8s`).
+2. Read `FLEET.md` for agent IDs, labels, **purpose**, and capability packs before targeting work.
+   Per-minion host profiles also live under `data/fleet/hosts/{agentId}.md` (summary from announce; full markdown after `host.profile`).
+3. Prefer structured actions the minion allowlists (`health`, sandboxed `exec`, `host` / `host.profile`, optional packs later).
+   Use `host.profile` (args `{ "refresh": true }` to re-probe) when you need the full HOST.md for a site.
 4. Confirm destructive actions with the user first.
 5. If the fleet bridge is not connected yet, say so honestly and fall back to SSH-Connect / manual steps.
 6. Home / HA tasks still go to **Amelia** — ASTRA is work/infra only.

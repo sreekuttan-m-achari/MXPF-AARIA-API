@@ -185,6 +185,14 @@ export type FleetAgent = {
     dispatchedAt: string;
   } | null;
   lastResult?: Record<string, unknown>;
+  host?: {
+    purpose: string;
+    os?: string;
+    arch?: string;
+    summary: string;
+    updatedAt: string;
+    hash: string;
+  };
 };
 
 export type FleetHub = {

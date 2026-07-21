@@ -235,7 +235,7 @@ export function OpsApp(_props: OpsAppProps): React.ReactElement {
           const agent = fleetAgents[listIdx]!;
           if (action === "fleet-approve") {
             setStatus(`approving ${agent.agentId}…`);
-            await approveFleetAgent(agent.agentId, agent.labels, agent.caps.length ? agent.caps : ["health", "exec"]);
+            await approveFleetAgent(agent.agentId, agent.labels, agent.caps.length ? agent.caps : ["health", "exec", "host"]);
             setStatus(`approved ${agent.agentId}`);
             await refresh();
           } else if (action === "fleet-health") {
@@ -557,6 +557,25 @@ function FleetView(props: {
           {agent.name ?? "—"}
           {agent.hostname ? ` · ${agent.hostname}` : ""}
         </Text>
+        {agent.host && (
+          <Box marginTop={1} flexDirection="column">
+            <Text bold>Host profile</Text>
+            <Text>
+              {agent.host.purpose}
+              {agent.host.os ? ` · ${agent.host.os}` : ""}
+              {agent.host.arch ? ` · ${agent.host.arch}` : ""}
+            </Text>
+            <Text dimColor>
+              {agent.host.summary
+                .split("\n")
+                .filter((l) => l.trim() && !l.startsWith("#") && !l.startsWith("Updated:"))
+                .slice(0, 6)
+                .join(" · ")
+                .slice(0, 160)}
+            </Text>
+            <Text dimColor>profile {fmtAgo(agent.host.updatedAt)}</Text>
+          </Box>
+        )}
         <Text dimColor>seen {fmtAgo(agent.lastSeenAt)} · approved {fmtAgo(agent.approvedAt)}</Text>
         {labels ? <Text dimColor>{labels}</Text> : null}
         <Text>
@@ -611,12 +630,14 @@ function FleetView(props: {
       {agents.map((a, i) => {
         const on = i === selected;
         const label = (a.name?.trim() || a.agentId).padEnd(22).slice(0, 22);
+        const purpose = (a.host?.purpose ?? "").slice(0, 18).padEnd(18);
         return (
           <Text key={a.agentId} inverse={on}>
             {on ? "› " : "  "}
             <Text color={presenceColor(a.presence)}>{a.presence.padEnd(8)}</Text>
             <Text bold>{label}</Text>
-            <Text dimColor>{a.task.slice(0, 36)}</Text>
+            <Text dimColor>{purpose} </Text>
+            <Text dimColor>{a.task.slice(0, 28)}</Text>
           </Text>
         );
       })}

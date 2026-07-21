@@ -4,6 +4,7 @@ import {
   serializeEnvelope,
 } from "./envelope.js";
 import { syncFleetMarkdown } from "./fleet-md.js";
+import { parseHostPayload, writeHostMirror } from "./host-profile.js";
 import {
   approveAgent,
   getAgent,
@@ -38,6 +39,8 @@ export async function listFleetAgentsView(): Promise<FleetAgentView[]> {
   return agents.map(toFleetAgentView);
 }
 
+const DEFAULT_APPROVE_CAPS = ["health", "exec", "host"];
+
 export type FleetBridge = {
   bus: FleetBus;
   listAgents: () => Promise<FleetAgentView[]>;
@@ -71,14 +74,23 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
       const caps = Array.isArray(env.payload.caps)
         ? (env.payload.caps as string[])
         : [];
+      const host = parseHostPayload(env.payload.host);
       await upsertPending({
         agentId: env.agentId,
         name,
         hostname,
         labels,
         caps,
+        host,
       });
-      console.error(`[fleet] pending announce from ${env.agentId}`);
+      if (host) {
+        await writeHostMirror(env.agentId, host);
+        const all = await listAgents();
+        await syncFleetMarkdown(all);
+      }
+      console.error(
+        `[fleet] pending announce from ${env.agentId}${host ? ` purpose=${host.purpose}` : ""}`,
+      );
     } catch (err) {
       console.error("[fleet] bad announce:", err);
     }
@@ -131,11 +143,23 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
     bus,
     listAgents: listFleetAgentsView,
     async approve(agentId, labels, caps) {
-      const record = await approveAgent(
-        agentId,
-        labels,
-        caps ?? ["health", "exec"],
-      );
+      const existing = await getAgent(agentId);
+      let nextCaps = caps ?? existing?.caps ?? DEFAULT_APPROVE_CAPS;
+      if (existing?.host && !nextCaps.includes("host")) {
+        nextCaps = [...nextCaps, "host"];
+      }
+      if (nextCaps.length === 0) {
+        nextCaps = DEFAULT_APPROVE_CAPS;
+      }
+      const nextLabels = { ...(labels ?? existing?.labels ?? {}) };
+      if (existing?.host?.purpose && !nextLabels.purpose) {
+        nextLabels.purpose = existing.host.purpose
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "")
+          .slice(0, 48);
+      }
+      const record = await approveAgent(agentId, nextLabels, nextCaps);
       const env = makeEnvelope("registry.approve", agentId, {
         approved: true,
         labels: record.labels,
@@ -156,14 +180,11 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
       const summary =
         action === "exec" && typeof args.cmd === "string"
           ? String(args.cmd).slice(0, 80)
-          : undefined;
+          : action === "host.profile" || action === "host"
+            ? "host profile"
+            : undefined;
       await setCurrentJob(agentId, { jobId, action, summary });
-      const env = makeEnvelope(
-        "cmd.exec",
-        agentId,
-        { action, args },
-        jobId,
-      );
+      const env = makeEnvelope("cmd.exec", agentId, { action, args }, jobId);
       await bus.publish(topics.cmd(agentId), serializeEnvelope(env), 1);
       return { jobId };
     },

@@ -27,6 +27,16 @@ const AgentRecordSchema = z.object({
   lastStatus: z.record(z.string(), z.unknown()).optional(),
   lastResult: z.record(z.string(), z.unknown()).optional(),
   currentJob: CurrentJobSchema,
+  host: z
+    .object({
+      purpose: z.string(),
+      os: z.string().optional(),
+      arch: z.string().optional(),
+      summary: z.string(),
+      updatedAt: z.string(),
+      hash: z.string(),
+    })
+    .optional(),
 });
 
 export type AgentRecord = z.infer<typeof AgentRecordSchema>;
@@ -81,6 +91,7 @@ export async function upsertPending(
     hostname?: string;
     labels?: Record<string, string>;
     caps?: string[];
+    host?: AgentRecord["host"];
   },
   cwd?: string,
 ): Promise<AgentRecord> {
@@ -99,6 +110,7 @@ export async function upsertPending(
     lastStatus: existing?.lastStatus,
     lastResult: existing?.lastResult,
     currentJob: existing?.currentJob ?? null,
+    host: input.host ?? existing?.host,
   };
   store.agents[input.agentId] = AgentRecordSchema.parse(record);
   await writeStore(store, cwd);
@@ -162,6 +174,40 @@ export async function recordAgentResult(
   ) {
     existing.currentJob = null;
   }
+
+  // Persist full HOST.md when host.profile returns markdown
+  if (
+    result.action === "host.profile" ||
+    result.action === "host"
+  ) {
+    const data = result.data;
+    if (data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const markdown =
+        typeof d.markdown === "string" ? d.markdown : undefined;
+      if (markdown && existing.host) {
+        const { writeHostMirror } = await import("./host-profile.js");
+        const purpose =
+          typeof d.purpose === "string" ? d.purpose : existing.host.purpose;
+        const nextHost = {
+          ...existing.host,
+          purpose,
+          os: typeof d.os === "string" ? d.os : existing.host.os,
+          arch: typeof d.arch === "string" ? d.arch : existing.host.arch,
+          summary: markdown.slice(0, 4 * 1024),
+          updatedAt:
+            typeof d.updatedAt === "string"
+              ? d.updatedAt
+              : new Date().toISOString(),
+          hash:
+            typeof d.hash === "string" ? d.hash : existing.host.hash,
+        };
+        existing.host = nextHost;
+        await writeHostMirror(agentId, nextHost, markdown, cwd);
+      }
+    }
+  }
+
   store.agents[agentId] = existing;
   await writeStore(store, cwd);
 }

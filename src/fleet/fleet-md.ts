@@ -14,14 +14,15 @@ export function renderFleetTable(agents: AgentRecord[]): string {
           .map(([k, v]) => `${k}=${v}`)
           .join(", ");
         const caps = a.caps.join(", ");
-        return `| ${a.agentId} | ${a.name ?? ""} | ${a.hostname ?? ""} | ${labels} | ${caps} | ${a.status} |`;
+        const purpose = a.host?.purpose ?? "";
+        return `| ${a.agentId} | ${a.name ?? ""} | ${a.hostname ?? ""} | ${purpose} | ${labels} | ${caps} | ${a.status} |`;
       })
-    : ["| *(none)* | | | | | |"];
+    : ["| *(none)* | | | | | | |"];
 
   return [
     BEGIN,
-    "| Agent ID | Name | Host / site | Labels | Caps | Status |",
-    "|----------|------|-------------|--------|------|--------|",
+    "| Agent ID | Name | Host / site | Purpose | Labels | Caps | Status |",
+    "|----------|------|-------------|---------|--------|------|--------|",
     ...rows,
     END,
   ].join("\n");
