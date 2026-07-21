@@ -33,7 +33,7 @@ import {
   learnTargetStyle,
   userPrefix,
 } from "./theme.js";
-import { colorizeCommandLine, colorizeReplyChunk } from "./render.js";
+import { colorizeCommandLine, colorizeReplyChunk, fitCommandHint } from "./render.js";
 
 function commandHelpLines(): string {
   return SLASH_COMMANDS.map((cmd) =>
@@ -237,6 +237,8 @@ async function main(): Promise<void> {
   let continuation = "";
 
   let hintVisible = false;
+  /** How many rows below the prompt the last hint occupied (for full clear). */
+  let hintLineCount = 0;
   let opsOpen = false;
 
   // While the agent is working, pause readline so keystrokes are not echoed and
@@ -401,12 +403,21 @@ async function main(): Promise<void> {
 
   // Render a dim suggestion line just below the prompt while typing a command.
   // Uses DEC save/restore cursor so the input line is never disturbed.
+  // Hint text is kept to one row — wrapped hints cannot be erased cleanly on backspace.
   const clearHint = (): void => {
-    if (!hintVisible) {
+    if (!hintVisible && hintLineCount === 0) {
       return;
     }
-    output.write("\x1b7\n\x1b[2K\x1b8");
+    const rows = Math.max(hintLineCount, hintVisible ? 1 : 0);
+    if (rows > 0) {
+      output.write("\x1b7");
+      for (let i = 0; i < rows; i++) {
+        output.write("\n\x1b[2K");
+      }
+      output.write("\x1b8");
+    }
     hintVisible = false;
+    hintLineCount = 0;
   };
 
   /**
@@ -444,12 +455,17 @@ async function main(): Promise<void> {
       clearHint();
       return;
     }
-    const text =
+    // Erase any previous hint rows before painting (avoids ghost wrap lines).
+    clearHint();
+    const raw =
       matches.length === 1
         ? `${c.cmd}${commandLabel(matches[0]!)}${c.reset} ${c.dim}— ${matches[0]!.summary}${c.reset}`
         : matches.map((cmd) => `${c.cmd}${commandLabel(cmd)}${c.reset}`).join("  ");
+    const cols = output.columns && output.columns > 0 ? output.columns : 80;
+    const text = fitCommandHint(raw, cols);
     output.write(`\x1b7\n\x1b[2K${c.dim}${text}${c.reset}\x1b8`);
     hintVisible = true;
+    hintLineCount = 1;
   };
 
   if (interactive) {
