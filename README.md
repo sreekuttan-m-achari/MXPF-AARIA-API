@@ -579,8 +579,18 @@ MXPF-AARIA-API/
 - **Amelia** (`amelia-widget`) — the home/personal assistant + KDE plasmoid (port 8787).
 - **ASTRA** (`MXPF-ASTRA-AGENT`) — remote site minions over MQTT (HiveMQ default). Design:
   `MXPF-ASTRA-AGENT/docs/superpowers/specs/2026-07-18-astra-design.md`.
+- **VIVA** (`VIVA-AI-Developer`) — autonomous AI software engineer (ticket → PR → rework).
+- **Code-Reviewer** — CI senior PR reviewer for Azure DevOps (consumes Cursor SDK in v1).
 - **SSH-Connect** — interactive remote console MCP (complement to ASTRA).
 - **MXPF-AARIA-THEME** — design tokens for the AARIA visual identity.
 
 AARIA and Amelia are siblings: same SDK foundation, different lanes. ASTRA minions extend
 AARIA’s reach to remote assets. Keep work with AARIA, home with Amelia, sites with ASTRA.
+
+## Future plans
+
+v1 uses **Cursor SDK only** (`@cursor/sdk`, `CURSOR_API_KEY`, `AARIA_MODEL`).
+
+**Later (cross-project):** pluggable AI brain adapters — OpenRouter, Anthropic (Claude), OpenAI, Grok/xAI, etc. — shared with VIVA and Code-Reviewer. Cursor remains the default until alternate providers pass the same integration bar.
+
+→ [`docs/superpowers/specs/2026-07-20-pluggable-ai-brain-future.md`](docs/superpowers/specs/2026-07-20-pluggable-ai-brain-future.md)

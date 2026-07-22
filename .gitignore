@@ -13,3 +13,5 @@ FLEET.md
 data/
 # Host-specific / private ops skills (do not publish)
 skills/ironss-maximprof-astra-sudo/
+
+.DS_Store
