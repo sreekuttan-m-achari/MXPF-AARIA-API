@@ -8,6 +8,7 @@ import type { AriaAgent } from "./agent.js";
 import { handleChatTurn } from "./chat.js";
 import { getMcpServerNames } from "./config/mcp.js";
 import { buildCursorStatus } from "./cursor-status.js";
+import { resolveModelId } from "./config/model.js";
 import { isChatCancelled } from "./errors.js";
 import { curatorStatus, runCurator } from "./learn/curator.js";
 import { memoryUsage } from "./learn/memory-store.js";
@@ -158,7 +159,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           user: userCallName(),
           learn: {
             review: learnReviewEnabled(),
-            model: process.env.AARIA_LEARN_MODEL?.trim() || "default",
+            model: resolveModelId("AARIA_LEARN_MODEL"),
             curator,
           },
           memoryStats: persona.memoryPath
