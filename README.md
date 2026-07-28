@@ -104,11 +104,13 @@ Persona is data-driven — edit `SOUL.md` (who she is), `USER.md` (who you are),
 **Runtime**
 
 - **Node.js ≥ 22.13** (uses the built-in `node:sqlite` for the local agent store; see `.nvmrc` → Node 22).
-- A **Cursor account/subscription** and a **`CURSOR_API_KEY`** (the SDK talks to the Cursor platform).
+- **Default brain:** Cursor account + **`CURSOR_API_KEY`**.
+- **Optional Claude brain:** set `AARIA_RUNTIME=claude` and **`ANTHROPIC_API_KEY`** (AARIA only; Amelia/ASTRA stay Cursor).
 
 **npm dependencies** (installed via `npm install`)
 
-- `@cursor/sdk` — agent runtime
+- `@cursor/sdk` — default agent runtime
+- `@anthropic-ai/claude-agent-sdk` — optional Claude Agent SDK runtime (`AARIA_RUNTIME=claude`)
 - `@modelcontextprotocol/sdk`, `@modelcontextprotocol/server-memory` — MCP + bundled memory server
 - `ws` — WebSocket server
 - `node-cron` — cron expressions for scheduled jobs
@@ -302,8 +304,11 @@ All settings are environment variables (see `.env-sample`). Common ones:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CURSOR_API_KEY` | — | **Required.** Cursor platform key |
-| `AARIA_MODEL` | `default` (Auto) | Cursor model id (`default`, `composer-2`, `composer-2.5`, …). List with SDK `Cursor.models.list` |
+| `AARIA_RUNTIME` | `cursor` | Agent harness: `cursor` or `claude` (alias `anthropic`). AARIA only. |
+| `CURSOR_API_KEY` | — | **Required** when `AARIA_RUNTIME=cursor` |
+| `ANTHROPIC_API_KEY` | — | **Required** when `AARIA_RUNTIME=claude` |
+| `AARIA_MODEL` | `default` (Auto) | Model id for the active runtime. Cursor: `default` / `composer-*`. Claude: Claude model id (or leave default → `AARIA_CLAUDE_MODEL`) |
+| `AARIA_CLAUDE_MODEL` | `claude-sonnet-4-5` | Fallback Claude model when `AARIA_MODEL` is unset / `default` / `composer-*` |
 | `AARIA_LEARN_MODEL` | same as `AARIA_MODEL` default (`default`) | Model for learn/curator agent |
 | `AARIA_WS_HOST` | `127.0.0.1` (`0.0.0.0` in Docker) | Bind address |
 | `AARIA_WS_PORT` | `8788` | HTTP/WS port |
@@ -589,8 +594,9 @@ AARIA’s reach to remote assets. Keep work with AARIA, home with Amelia, sites 
 
 ## Future plans
 
-v1 uses **Cursor SDK only** (`@cursor/sdk`, `CURSOR_API_KEY`, `AARIA_MODEL`).
+AARIA can switch harness via `AARIA_RUNTIME` (`cursor` default, or `claude`). Amelia and ASTRA are still Cursor-only.
 
-**Later (cross-project):** pluggable AI brain adapters — OpenRouter, Anthropic (Claude), OpenAI, Grok/xAI, etc. — shared with VIVA and Code-Reviewer. Cursor remains the default until alternate providers pass the same integration bar.
+**Later (cross-project):** more brain adapters (OpenRouter, OpenAI, Grok/xAI) and the same switch for Amelia/ASTRA. See:
 
+→ [`docs/superpowers/specs/2026-07-28-switchable-agent-runtime-design.md`](docs/superpowers/specs/2026-07-28-switchable-agent-runtime-design.md)  
 → [`docs/superpowers/specs/2026-07-20-pluggable-ai-brain-future.md`](docs/superpowers/specs/2026-07-20-pluggable-ai-brain-future.md)

@@ -302,6 +302,10 @@ export async function bootstrapPersonaIfPresent(
       console.error("[persona] Warm-up failed:", err.message);
       return undefined;
     }
+    if (err instanceof Error) {
+      console.error("[persona] Warm-up failed:", err.message);
+      return undefined;
+    }
     throw err;
   }
 }

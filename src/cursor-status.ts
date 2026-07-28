@@ -6,6 +6,10 @@ import { Cursor } from "@cursor/sdk";
 import { buildContextStatus } from "./context-status.js";
 import { resolveModelId } from "./config/model.js";
 import { agentCwd } from "./persona.js";
+import {
+  resolveClaudeModelId,
+  resolveRuntimeKind,
+} from "./runtime/kind.js";
 import { getUsageSnapshot } from "./usage.js";
 import { isWarm } from "./warmup.js";
 
@@ -48,14 +52,13 @@ function maskApiKey(key: string | undefined): {
 }
 
 function sdkPackageVersion(): string | undefined {
+  const runtime = resolveRuntimeKind();
+  const pkgName =
+    runtime === "claude"
+      ? "@anthropic-ai/claude-agent-sdk"
+      : "@cursor/sdk";
   try {
-    const pkgPath = join(
-      process.cwd(),
-      "node_modules",
-      "@cursor",
-      "sdk",
-      "package.json",
-    );
+    const pkgPath = join(process.cwd(), "node_modules", ...pkgName.split("/"), "package.json");
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
     return pkg.version;
   } catch {
@@ -124,6 +127,7 @@ async function getModels(): Promise<ModelsCache | null> {
 export async function buildCursorStatus(sessionId?: string): Promise<{
   ok: true;
   config: {
+    runtime: string;
     model: string;
     learnModel: string;
     apiKeyConfigured: boolean;
@@ -139,16 +143,33 @@ export async function buildCursorStatus(sessionId?: string): Promise<{
   usage: ReturnType<typeof getUsageSnapshot>;
   context: ReturnType<typeof buildContextStatus>;
 }> {
-  const key = process.env.CURSOR_API_KEY?.trim();
+  const runtime = resolveRuntimeKind();
+  const key =
+    runtime === "claude"
+      ? process.env.ANTHROPIC_API_KEY?.trim()
+      : process.env.CURSOR_API_KEY?.trim();
   const masked = maskApiKey(key);
-  const accountResult = await getAccount();
-  const models = await getModels();
+  const accountResult =
+    runtime === "cursor"
+      ? await getAccount()
+      : { ok: false as const, error: "account status is Cursor-only" };
+  const models = runtime === "cursor" ? await getModels() : null;
+
+  const model =
+    runtime === "claude"
+      ? resolveClaudeModelId("AARIA_MODEL")
+      : resolveModelId("AARIA_MODEL");
+  const learnModel =
+    runtime === "claude"
+      ? resolveClaudeModelId("AARIA_LEARN_MODEL")
+      : resolveModelId("AARIA_LEARN_MODEL");
 
   return {
     ok: true,
     config: {
-      model: resolveModelId("AARIA_MODEL"),
-      learnModel: resolveModelId("AARIA_LEARN_MODEL"),
+      runtime,
+      model,
+      learnModel,
       apiKeyConfigured: masked.configured,
       apiKeyHint: masked.hint,
       agentCwd: agentCwd(),

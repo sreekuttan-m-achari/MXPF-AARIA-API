@@ -27,6 +27,7 @@
     "install:reinstall:win": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/install-upgrade.ps1 -Reinstall"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.220",
     "@cursor/sdk": "^1.0.22",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@modelcontextprotocol/server-memory": "^2026.1.26",

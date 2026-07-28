@@ -1,12 +1,11 @@
 import type {
   LocalRunStreamSdkMessageEvent,
-  Run,
-  RunResult,
   SDKAssistantMessage,
   SDKMessage,
 } from "@cursor/sdk";
 
 import type { AriaAgent } from "./agent.js";
+import type { AriaRun, AriaRunResult } from "./runtime/types.js";
 import { withAgentBusyRecovery, isAgentBusyError } from "./agent-busy.js";
 import { ChatCancelledError } from "./errors.js";
 import {
@@ -118,8 +117,8 @@ export function createStreamingCollector(
 }
 
 function describeRunFailure(
-  result: RunResult,
-  run: Run,
+  result: AriaRunResult,
+  run: AriaRun,
   streamHint?: string,
 ): string {
   const detail = result.result?.trim() || run.result?.trim() || streamHint?.trim();
@@ -185,7 +184,7 @@ async function runChatTurnOnce(
         model: modelId,
         durationMs: result.durationMs ?? run.durationMs,
         requestId: result.requestId ?? run.requestId,
-        usage: result.usage,
+        usage: result.usage as never,
       });
       throw new ChatCancelledError(collector.getText().trim());
     }
@@ -196,7 +195,7 @@ async function runChatTurnOnce(
         model: modelId,
         durationMs: result.durationMs ?? run.durationMs,
         requestId: result.requestId ?? run.requestId,
-        usage: result.usage,
+        usage: result.usage as never,
       });
       const hint = collector.getFailureHint();
       const message = describeRunFailure(result, run, hint);
@@ -222,7 +221,7 @@ async function runChatTurnOnce(
       model: modelId,
       durationMs: result.durationMs ?? run.durationMs,
       requestId: result.requestId ?? run.requestId,
-      usage: result.usage,
+      usage: result.usage as never,
     });
 
     const reply = collector.getText().trim();
