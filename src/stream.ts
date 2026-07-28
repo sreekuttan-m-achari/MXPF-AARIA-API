@@ -1,12 +1,11 @@
 import type {
   LocalRunStreamSdkMessageEvent,
-  Run,
-  RunResult,
   SDKAssistantMessage,
   SDKMessage,
 } from "@cursor/sdk";
 
 import type { AriaAgent } from "./agent.js";
+import type { AriaRun, AriaRunResult } from "./runtime/types.js";
 import { withAgentBusyRecovery } from "./agent-busy.js";
 import { ChatCancelledError } from "./errors.js";
 import {
@@ -77,7 +76,7 @@ export function createStreamingCollector(
   };
 }
 
-function describeRunFailure(result: RunResult, run: Run): string {
+function describeRunFailure(result: AriaRunResult, run: AriaRun): string {
   const detail = result.result?.trim() || run.result?.trim();
   if (detail) {
     return detail;
