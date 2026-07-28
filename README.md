@@ -89,11 +89,13 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 **Runtime**
 
 - **Node.js ≥ 22.13** (uses the built-in `node:sqlite` for the local agent store; see `.nvmrc` → Node 22).
-- A **Cursor account/subscription** and a **`CURSOR_API_KEY`** (the SDK talks to the Cursor platform).
+- **Default brain:** Cursor account + **`CURSOR_API_KEY`**.
+- **Optional Claude brain:** set `AARIA_RUNTIME=claude` and **`ANTHROPIC_API_KEY`** (AARIA only).
 
 **npm dependencies** (installed via `npm install`)
 
-- `@cursor/sdk` — agent runtime
+- `@cursor/sdk` — default agent runtime
+- `@anthropic-ai/claude-agent-sdk` — optional Claude Agent SDK runtime (`AARIA_RUNTIME=claude`)
 - `@modelcontextprotocol/sdk`, `@modelcontextprotocol/server-memory` — MCP + bundled memory server
 - `ws` — WebSocket server
 - `node-cron` — cron expressions for scheduled jobs
@@ -286,7 +288,10 @@ All settings are environment variables (see `.env-sample`). Common ones:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CURSOR_API_KEY` | — | **Required.** Cursor platform key |
+| `AARIA_RUNTIME` | `cursor` | Agent harness: `cursor` or `claude` (alias `anthropic`) |
+| `CURSOR_API_KEY` | — | **Required** when `AARIA_RUNTIME=cursor` |
+| `ANTHROPIC_API_KEY` | — | **Required** when `AARIA_RUNTIME=claude` |
+| `AARIA_CLAUDE_MODEL` | `claude-sonnet-4-5` | Fallback Claude model when `AARIA_MODEL` is unset / Cursor-ish |
 | `AARIA_WS_HOST` | `127.0.0.1` (`0.0.0.0` in Docker) | Bind address |
 | `AARIA_WS_PORT` | `8788` | HTTP/WS port |
 | `AARIA_API_URL` | `http://127.0.0.1:8788` | Base URL the TUI/health client dials |

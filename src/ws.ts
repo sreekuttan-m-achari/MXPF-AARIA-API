@@ -144,6 +144,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           ok: true,
           name: "ARIA",
           version: "0.1.0",
+          runtime: currentAgent().runtime,
           sessionId: currentAgent().agentId,
           warm: isWarm(),
           greeting,

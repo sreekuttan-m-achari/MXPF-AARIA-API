@@ -5,6 +5,7 @@ import {
 } from "@cursor/sdk";
 
 import { agentCwd } from "./persona.js";
+import { resolveRuntimeKind } from "./runtime/kind.js";
 
 function busyRetryDelayMs(): number {
   return Math.max(
@@ -48,6 +49,10 @@ export async function cancelStaleRuns(
   cwd = agentCwd(),
   apiKey = process.env.CURSOR_API_KEY?.trim(),
 ): Promise<number> {
+  if (resolveRuntimeKind() !== "cursor") {
+    return 0;
+  }
+
   const opts = runOptions(agentId, cwd, apiKey);
   let cancelled = 0;
 
@@ -79,6 +84,11 @@ export async function recoverFromBusyAgent(
   cwd = agentCwd(),
   apiKey = process.env.CURSOR_API_KEY?.trim(),
 ): Promise<boolean> {
+  if (resolveRuntimeKind() !== "cursor") {
+    await new Promise<void>((resolve) => setTimeout(resolve, busyRetryDelayMs()));
+    return false;
+  }
+
   const cancelled = await cancelStaleRuns(agentId, cwd, apiKey);
   if (cancelled > 0) {
     return true;

@@ -1,8 +1,8 @@
-import type { Run } from "@cursor/sdk";
+import type { AriaRun } from "./runtime/types.js";
 
-const activeRuns = new Map<string, Run>();
+const activeRuns = new Map<string, AriaRun>();
 
-export function registerActiveRun(chatId: string, run: Run): void {
+export function registerActiveRun(chatId: string, run: AriaRun): void {
   activeRuns.set(chatId, run);
 }
 
