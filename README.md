@@ -7,21 +7,28 @@
 **AARIA** (always two A's — **A**·**A**·RIA, short form *ARIA*) is a local, Cursor-SDK
 powered assistant that lives in your terminal and runs as a background service. She owns
 the **professional lane**: code, DevOps, servers, infrastructure, and planning. Her
-sibling **Amelia** owns the **home lane** (personal life + Home Assistant) and runs as a
-separate service. AARIA hands home/personal requests to Amelia and keeps the work desk
-for herself.
+sibling **Amelia** owns the **home lane** (personal life + Home Assistant). Her
+**ASTRA** minions (*Autonomous Site Task & Response Agent*) hold remote VPS/K8s sites
+over an MQTT hub. AARIA hands home/personal requests to Amelia and keeps the work desk
+(and fleet command) for herself.
 
 ```
 ┌──────────────────────────────┐        ┌──────────────────────────────┐
 │  ARIA  ·  work lane           │        │  Amelia  ·  home lane         │
 │  MXPF-AARIA-API   (port 8788) │        │  amelia-widget    (port 8787) │
-│  code · devops · servers      │        │  personal · Home Assistant    │
+│  code · devops · fleet cmd    │        │  personal · Home Assistant    │
 └──────────────┬───────────────┘        └──────────────┬───────────────┘
-               │  Cursor SDK agent                      │  Cursor SDK agent
+               │  Cursor SDK (desk)                     │  Cursor SDK
                ▼                                        ▼
         ┌─────────────────────────────────────────────────────┐
         │  Cursor platform  ·  MCP tools (memory, HA, fetch)    │
-        └─────────────────────────────────────────────────────┘
+        └──────────────────────────┬──────────────────────────┘
+                                   │ MQTT (HiveMQ default)
+                                   ▼
+                    ┌──────────────────────────┐
+                    │  ASTRA minions (remote)   │
+                    │  MXPF-ASTRA-AGENT         │
+                    └──────────────────────────┘
 ```
 
 ---
@@ -46,8 +53,9 @@ agent runtime, plus a terminal client (TUI). The goals:
 - **Temperament:** precise, calm, mission-focused; warm but not chatty.
 - **Lane:** work / professional. Delegates home + Home Assistant to Amelia.
 
-Persona is data-driven — edit `SOUL.md` (who she is) and `USER.md` (who you are). Samples
-are provided as `SOUL.sample.md` / `USER.sample.md`.
+Persona is data-driven — edit `SOUL.md` (who she is), `USER.md` (who you are), and
+`FLEET.md` (ASTRA minion roster). Samples are provided as `SOUL.sample.md` /
+`USER.sample.md` / `FLEET.sample.md`. Fleet ops skill: `skills/astra-fleet/`.
 
 ---
 
@@ -58,18 +66,25 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 | **API server** | `src/main.ts`, `src/ws.ts` | HTTP + WebSocket endpoints, warmup, stale-run cleanup |
 | **Agent** | `src/agent-manager.ts`, `src/agent.ts` | Boots the Cursor SDK agent, local store, session resume |
 | **Chat** | `src/chat.ts`, `src/stream.ts`, `src/runs.ts` | Turn handling and token streaming |
-| **Persona** | `src/persona.ts` | Loads `SOUL.md` / `USER.md` / `MEMORY.md`, working dir |
+| **Persona** | `src/persona.ts` | Loads `SOUL.md` / `USER.md` / `MEMORY.md` / `FLEET.md`, working dir |
 | **Learn loop** | `src/learn/*.ts` | Post-turn review → `MEMORY.md` / `USER.md` (Hermes-style) |
 | **Scheduler** | `src/scheduler/*.ts` | Heartbeat, interval/cron jobs, `/jobs` API |
+| **Fleet** | *(planned)* `src/fleet/*` | MQTT bridge to ASTRA minions (HiveMQ default) |
 | **MCP** | `src/config/mcp.ts` | Loads `.cursor/mcp.json` tool servers |
 | **TUI** | `src/tui/*.ts` | `aaria` terminal client (REPL, completion, auto-start) |
-| **Deploy** | `deploy/*`, `bin/aaria` | systemd unit + CLI installer |
+| **Deploy** | `deploy/*`, `bin/aaria` | systemd / LaunchAgent / Windows task + CLI installer |
 
 ### API endpoints (default `http://127.0.0.1:8788`)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET`  | `/health` | Status: name, version, session id, warm flag, greeting, persona/MCP/memory stats, scheduler summary |
+| `GET`  | `/cursor` | Cursor API config (model, masked key), account, token usage, available models |
+| `GET`  | `/fleet/health` | Fleet MQTT bridge status (`enabled`, `connected`) |
+| `GET`  | `/fleet/agents` | Pending + approved ASTRA minions |
+| `POST` | `/fleet/approve` | `{ "agentId", "labels?", "caps?" }` — approve minion |
+| `POST` | `/fleet/cmd` | `{ "agentId", "action", "args?" }` — dispatch `cmd.exec` |
+| `POST` | `/fleet/update` | `{ "agentIds": "all" \| ["id",…], "refreshHost?", "reinstall?" }` — remote install/upgrade on minions |
 | `GET`  | `/heartbeat` | Last in-process heartbeat snapshot (RAM, load, warnings) |
 | `GET`  | `/jobs` | All configured jobs with last/next run state |
 | `POST` | `/jobs/run` | `{ "id": "heartbeat" }` — run a job immediately |
@@ -90,7 +105,7 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 
 - **Node.js ≥ 22.13** (uses the built-in `node:sqlite` for the local agent store; see `.nvmrc` → Node 22).
 - **Default brain:** Cursor account + **`CURSOR_API_KEY`**.
-- **Optional Claude brain:** set `AARIA_RUNTIME=claude` and **`ANTHROPIC_API_KEY`** (AARIA only).
+- **Optional Claude brain:** set `AARIA_RUNTIME=claude` and **`ANTHROPIC_API_KEY`** (AARIA only; Amelia/ASTRA stay Cursor).
 
 **npm dependencies** (installed via `npm install`)
 
@@ -117,7 +132,8 @@ are provided as `SOUL.sample.md` / `USER.sample.md`.
 Clone/enter the project, then choose **host** or **Docker**.
 
 **Quick path (recommended):** run the guided installer — prerequisites, `.env`, persona
-files, CLI, background service (Linux/Windows), and health checks in one flow:
+files, optional MCP + **local Piper voice**, CLI, background service (Linux/Windows), and
+health checks in one flow:
 
 ```bash
 # Linux / macOS (same script)
@@ -169,37 +185,36 @@ aaria                           # opens the TUI (auto-starts the service if down
 
 ### 2a-mac. Run on macOS (host)
 
-Same guided installer as Linux. **There is no systemd on macOS** — run the API in the
-foreground (or your own launchd/plist); the installer skips the service step automatically.
+Same guided installer as Linux. On macOS the background API is a **LaunchAgent**
+(`com.aaria.api`) instead of systemd.
 
-Requires **Node.js ≥ 22.13** (nvm recommended), and `~/.local/bin` on PATH (zsh):
+Requires **Node.js ≥ 22.13** (nvm or Homebrew), and `~/.local/bin` on PATH (zsh):
 
 ```bash
-# Guided install (recommended)
+# Guided install (recommended) — installs LaunchAgent in Step 7
 bash deploy/install-upgrade.sh
 # or: npm run install
 
 # Or step by step:
-nvm install && nvm use
 npm install
 cp .env-sample .env             # set CURSOR_API_KEY
 cp SOUL.sample.md SOUL.md
 cp USER.sample.md USER.md
 cp MEMORY.sample.md MEMORY.md
 npm run install-cli             # aaria → ~/.local/bin
+bash deploy/install-service.sh  # LaunchAgent com.aaria.api
 
 # PATH for zsh (default shell on modern macOS)
 grep -q '.local/bin' ~/.zshrc 2>/dev/null || \
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 
-# Terminal 1 — API
-npm start                       # → http://127.0.0.1:8788
-
-# Terminal 2 — TUI
+# TUI (auto-starts LaunchAgent if the API is down)
 aaria
 
 curl -s http://127.0.0.1:8788/health | python3 -m json.tool
+launchctl print gui/$(id -u)/com.aaria.api
+tail -f ~/Library/Logs/aaria/aria-api.err.log
 ```
 
 Reinstall without touching local config:
@@ -209,7 +224,7 @@ bash deploy/install-upgrade.sh --reinstall
 ```
 
 > **Note:** `install-service.sh` / `install-heartbeat-timer.sh` are Linux/systemd only.
-> On macOS use `npm start` and the in-process job scheduler (or a cron `curl` to `/jobs/run`).
+> On macOS the in-process job scheduler covers heartbeats; optional: cron `curl` to `/jobs/run`.
 > See `deploy/README.md` for the full platform matrix.
 
 ### 2a-win. Run on Windows (host)
@@ -238,15 +253,16 @@ aaria                          # TUI (new terminal after PATH update)
 |-------|-------|---------|
 | `bash deploy/install-upgrade.sh` | same | `npm run install:win` |
 | `bash deploy/install-upgrade.sh --reinstall` | same | `npm run install:reinstall:win` |
-| `bash deploy/install-service.sh` | `npm start` | `npm run install-service:win` |
+| `bash deploy/install-service.sh` | same (LaunchAgent) | `npm run install-service:win` |
 | `bash deploy/install-heartbeat-timer.sh` | in-process / cron | `npm run install-heartbeat:win` |
 | `npm run install-cli` | same | `npm run install-cli:win` |
-| `systemctl --user start aria-api.service` | `npm start` | `Start-ScheduledTask -TaskName ARIA-API` |
-| `journalctl --user -u aria-api.service -f` | terminal running `npm start` | Task Scheduler → **ARIA-API** |
+| `systemctl --user start aria-api.service` | `launchctl kickstart -k gui/$(id -u)/com.aaria.api` | `Start-ScheduledTask -TaskName ARIA-API` |
+| `journalctl --user -u aria-api.service -f` | `tail -f ~/Library/Logs/aaria/aria-api.err.log` | Task Scheduler → **ARIA-API** |
 | `~/.local/bin` on PATH | `~/.local/bin` in `~/.zshrc` | `%USERPROFILE%\.local\bin` on user PATH |
 
-> **Note:** The TUI's auto-start of `aria-api.service` is Linux/systemd only. On macOS and
-> Windows, start the API first (`npm start` or the Windows scheduled task) before `aaria`.
+> **Note:** The TUI auto-starts the background service when the API is down — systemd on
+> Linux, LaunchAgent `com.aaria.api` on macOS, and the Windows scheduled task after
+> `install-service:win`.
 
 ### 2b. Run with Docker
 
@@ -288,10 +304,12 @@ All settings are environment variables (see `.env-sample`). Common ones:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AARIA_RUNTIME` | `cursor` | Agent harness: `cursor` or `claude` (alias `anthropic`) |
+| `AARIA_RUNTIME` | `cursor` | Agent harness: `cursor` or `claude` (alias `anthropic`). AARIA only. |
 | `CURSOR_API_KEY` | — | **Required** when `AARIA_RUNTIME=cursor` |
 | `ANTHROPIC_API_KEY` | — | **Required** when `AARIA_RUNTIME=claude` |
-| `AARIA_CLAUDE_MODEL` | `claude-sonnet-4-5` | Fallback Claude model when `AARIA_MODEL` is unset / Cursor-ish |
+| `AARIA_MODEL` | `default` (Auto) | Model id for the active runtime. Cursor: `default` / `composer-*`. Claude: Claude model id (or leave default → `AARIA_CLAUDE_MODEL`) |
+| `AARIA_CLAUDE_MODEL` | `claude-sonnet-4-5` | Fallback Claude model when `AARIA_MODEL` is unset / `default` / `composer-*` |
+| `AARIA_LEARN_MODEL` | same as `AARIA_MODEL` default (`default`) | Model for learn/curator agent |
 | `AARIA_WS_HOST` | `127.0.0.1` (`0.0.0.0` in Docker) | Bind address |
 | `AARIA_WS_PORT` | `8788` | HTTP/WS port |
 | `AARIA_API_URL` | `http://127.0.0.1:8788` | Base URL the TUI/health client dials |
@@ -316,6 +334,66 @@ All settings are environment variables (see `.env-sample`). Common ones:
 | `AARIA_HEARTBEAT_EVERY` | `5m` | Default heartbeat interval (`30s`, `5m`, `1h`, …) |
 | `AARIA_MORNING_BRIEF` | on | First WebSocket connect each day triggers a morning brief |
 | `AARIA_TIMEZONE` | — | Override `USER.md` timezone for daily brief (default `Asia/Kolkata`) |
+| `AARIA_VOICE` | on if backend found | Set `0` to disable local TTS |
+| `AARIA_TTS` | `auto` | `auto` \| `piper` \| `spd-say` |
+| `AARIA_PIPER_MODEL` | auto-discover | Path to Piper `.onnx` voice |
+| `AARIA_PIPER_PERSISTENT` | `1` (on) | Keep Piper+model loaded after warmup; `0` = spawn per utterance |
+| `AARIA_PIPER_PCM_IDLE_MS` | `280` | Persistent mode: silence gap that ends an utterance |
+| `AARIA_PIPER_QUALITY` | auto | `low` \| `medium` — auto prefers low on &lt;5 GiB RAM / tight free RAM |
+| `AARIA_VOICE_MAX_CHARS` | `280` | Max chars spoken per turn (budget across sentences) |
+| `AARIA_VOICE_PROVISIONAL_CHARS` | `72` | Speak a short clip before the first `.!?` lands |
+
+### Voice reply (local TTS)
+
+The API speaks during interactive chat (TUI, plasmoid, HTTP/WS). Scheduler jobs and morning briefs stay silent. No extra Cursor tokens — text is cleaned/clipped with heuristics.
+
+**What you hear (per turn):**
+1. **Each new sentence** of AARIA’s reply as it streams (queued; does not cut off the previous line)  
+2. Any leftover fragment at end of turn — **not** a full replay of text already spoken  
+3. Startup **greeting** / other API notifications when those fire  
+
+User messages are **never** spoken back.
+
+**Character voice:** British English Piper **Cori** (`en_GB-cori-medium`) by default — calm, composed, FRIDAY-like. Pace defaults to `AARIA_PIPER_LENGTH_SCALE≈1`.
+
+**Latency (persistent Piper — default):**
+- On API boot / `POST /voice/warmup`, AARIA starts a **long-lived** `piper --output-raw` process and loads the ONNX model **once** (~10–15 s on a mid-range CPU).  
+- Later utterances reuse that process (~0.5 s to first audio instead of reloading ~12 s every time).  
+- The TUI also calls warmup on boot so the first spoken reply is already hot.  
+- Cancel / `/voice off` stops playback; the model stays loaded until the API exits or voice is muted.  
+- Set `AARIA_PIPER_PERSISTENT=0` to restore legacy one-shot spawn (slow; debugging only).
+
+Design notes: `docs/superpowers/specs/2026-07-17-aaria-voice-reply-design.md` and `docs/superpowers/specs/2026-07-19-persistent-piper-tts-design.md`.
+
+Backends (auto-detected):
+
+1. **Piper** — if `piper` is on `PATH`, a `.onnx` model is found, and `paplay` / `pw-play` / `aplay` / `afplay` (macOS) is available
+2. **`spd-say`** — Speech Dispatcher (`en-GB` preferred)
+3. Off — chat still works
+
+Install Piper + Cori (recommended — also offered by `install-upgrade.sh` prerequisites):
+
+```bash
+bash deploy/install-voice.sh
+# or: npm run install-voice
+```
+
+Manual Cori download (if you already have `piper` on PATH):
+
+```bash
+mkdir -p ~/.local/share/piper && cd ~/.local/share/piper
+curl -fsSL -o en_GB-cori-medium.onnx \
+  "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/cori/medium/en_GB-cori-medium.onnx?download=true"
+curl -fsSL -o en_GB-cori-medium.onnx.json \
+  "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_GB/cori/medium/en_GB-cori-medium.onnx.json?download=true"
+```
+
+On RAM-tight hosts (&lt;5 GiB), prefer a **low** voice if you have one installed (`AARIA_PIPER_QUALITY=low`), or pin `AARIA_PIPER_MODEL` to a `*-low.onnx` file.
+
+Startup logs which engine is active, e.g.  
+`[aria-voice] engine=piper … mode=stream/persistent` and  
+`[aria-voice] persistent piper ready (…)`.
+The guided installer can download the voice and set these env vars (`bash deploy/install-upgrade.sh`).
 
 ### Morning brief (first connect)
 
@@ -420,12 +498,18 @@ Built-in commands (type `/` for live suggestions, `Tab` to complete):
 |---------|-------------|
 | `/help` | Show help |
 | `/health` | Backend status |
-| `/ops` | Ops overlay (Health / Jobs / Memory / Chat) — also **Ctrl+O**; set `AARIA_OPS=0` to disable |
+| `/ops` | Ops overlay (Health / Jobs / Memory / Chat / Cursor / Fleet) — also **Ctrl+O**; set `AARIA_OPS=0` to disable |
+| `/memory` | Learn loop (`pending` · `approve` · `reject` · `curate`) |
+| `/skills` | List installed skills |
+| `/skill <name> [prompt]` | Load a skill for this turn |
+| `/voice` | Voice on/off (`/voice` · `on` · `off`) |
+| `/new` (`/reset`) | Fresh Cursor session (clears ops chat history) |
 | `/cancel` | Cancel the current reply |
-| `/quit` (`/exit`, `Ctrl+D`) | Exit |
+| `/quit` (`/q`, `/exit`, `Ctrl+D`) | Exit |
 
 Anything else is sent to AARIA as a work request. If the API isn't running, the TUI
 auto-starts `aria-api.service` and waits for it to warm up (host installs only).
+If the WebSocket drops, the TUI reconnects automatically.
 
 ---
 
@@ -438,6 +522,8 @@ MXPF-AARIA-API/
 ├── deploy/
 │   ├── README.md               # Linux / macOS / Windows deploy matrix
 │   ├── aria-api.service.in     # systemd user-unit template (Linux)
+│   ├── com.aaria.api.plist.in  # LaunchAgent template (macOS)
+│   ├── aaria-api-launch.sh     # LaunchAgent entrypoint (loads .env)
 │   ├── aria-api.launch.cmd.in  # API launch template (Windows)
 │   ├── aria-heartbeat.*.in     # optional external heartbeat (Linux)
 │   ├── aria-heartbeat.invoke.cmd.in
@@ -478,13 +564,39 @@ MXPF-AARIA-API/
 - **Docker healthcheck stuck `starting`** — first boot warms the agent; allow ~40s
   (`start_period`). Inspect with `docker compose logs -f aaria-api`.
 - **Fresh session wanted** — remove the state volume: `docker compose down -v`.
+- **Voice lag / long pause before speech** — ensure persistent Piper is on (default).
+  Logs should show `mode=stream/persistent` and `persistent piper ready`. First warmup
+  after restart still takes ~10–15 s (model load); later utterances should be ~sub-second.
+  If you see one-shot reloads every time, check `AARIA_PIPER_PERSISTENT` is not `0` and
+  `AARIA_PIPER_WAV` is not `1`. On low-RAM hosts, install a `*-low.onnx` voice.
+- **No speech at all** — `piper` on `PATH`, player (`paplay`/`pw-play`/`aplay`), and an
+  `.onnx` under `~/.local/share/piper` (or `AARIA_PIPER_MODEL`). Toggle with `/voice on`.
+- **TUI `reconnecting…` / API exit with `write EPIPE`** — usually Piper/paplay pipe broke
+  under host memory pressure (not AARIA `mem 100%`, which is MEMORY.md budget). The API
+  now swallows EPIPE; still free RAM (Cursor/k3s) if the desk is thrashing.
+- **`mem 100%` in chat footer** — that is the **MEMORY.md character budget**, not host RAM.
+  Host pressure shows in heartbeat warnings / `free -h` / ops Health panel.
 
 ---
 
 ## Related projects
 
 - **Amelia** (`amelia-widget`) — the home/personal assistant + KDE plasmoid (port 8787).
+- **ASTRA** (`MXPF-ASTRA-AGENT`) — remote site minions over MQTT (HiveMQ default). Design:
+  `MXPF-ASTRA-AGENT/docs/superpowers/specs/2026-07-18-astra-design.md`.
+- **VIVA** (`VIVA-AI-Developer`) — autonomous AI software engineer (ticket → PR → rework).
+- **Code-Reviewer** — CI senior PR reviewer for Azure DevOps (consumes Cursor SDK in v1).
+- **SSH-Connect** — interactive remote console MCP (complement to ASTRA).
 - **MXPF-AARIA-THEME** — design tokens for the AARIA visual identity.
 
-AARIA and Amelia are siblings: same SDK foundation, different lanes. Keep work with AARIA,
-home with Amelia.
+AARIA and Amelia are siblings: same SDK foundation, different lanes. ASTRA minions extend
+AARIA’s reach to remote assets. Keep work with AARIA, home with Amelia, sites with ASTRA.
+
+## Future plans
+
+AARIA can switch harness via `AARIA_RUNTIME` (`cursor` default, or `claude`). Amelia and ASTRA are still Cursor-only.
+
+**Later (cross-project):** more brain adapters (OpenRouter, OpenAI, Grok/xAI) and the same switch for Amelia/ASTRA. See:
+
+→ [`docs/superpowers/specs/2026-07-28-switchable-agent-runtime-design.md`](docs/superpowers/specs/2026-07-28-switchable-agent-runtime-design.md)  
+→ [`docs/superpowers/specs/2026-07-20-pluggable-ai-brain-future.md`](docs/superpowers/specs/2026-07-20-pluggable-ai-brain-future.md)

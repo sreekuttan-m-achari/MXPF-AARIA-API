@@ -6,17 +6,19 @@ import type {
 
 import type { AriaAgent } from "./agent.js";
 import type { AriaRun, AriaRunResult } from "./runtime/types.js";
-import { withAgentBusyRecovery } from "./agent-busy.js";
+import { withAgentBusyRecovery, isAgentBusyError } from "./agent-busy.js";
 import { ChatCancelledError } from "./errors.js";
 import {
   registerActiveRun,
   unregisterActiveRun,
 } from "./runs.js";
+import { recordRunUsage } from "./usage.js";
 
 type Collector = {
   reset: () => void;
   handleEvent: (event: unknown) => void;
   getText: () => string;
+  getFailureHint: () => string | undefined;
 };
 
 function isWrappedStreamEvent(e: unknown): e is LocalRunStreamSdkMessageEvent {
@@ -43,6 +45,8 @@ export function createStreamingCollector(
   onChunk?: (text: string) => void,
 ): Collector {
   let text = "";
+  let lastStatusMessage: string | undefined;
+  let lastErrorCode: string | undefined;
 
   function appendAssistant(msg: SDKAssistantMessage): void {
     for (const block of msg.message.content) {
@@ -55,17 +59,43 @@ export function createStreamingCollector(
 
   function reset(): void {
     text = "";
+    lastStatusMessage = undefined;
+    lastErrorCode = undefined;
   }
 
   function handleEvent(event: unknown): void {
+    if (
+      typeof event === "object" &&
+      event !== null &&
+      (event as { type?: unknown }).type === "result"
+    ) {
+      const code = (event as { errorCode?: unknown }).errorCode;
+      if (typeof code === "string" && code.length > 0) {
+        lastErrorCode = code;
+      }
+      return;
+    }
+
     if (isWrappedStreamEvent(event)) {
       if (event.message.type === "assistant") {
         appendAssistant(event.message);
+      } else if (event.message.type === "status") {
+        if (event.message.message?.trim()) {
+          lastStatusMessage = event.message.message.trim();
+        }
+        if (event.message.status === "ERROR" || event.message.status === "EXPIRED") {
+          lastStatusMessage =
+            lastStatusMessage || `run status ${event.message.status}`;
+        }
       }
       return;
     }
     if (isSdkMessage(event) && event.type === "assistant") {
       appendAssistant(event);
+    } else if (isSdkMessage(event) && event.type === "status") {
+      if (event.message?.trim()) {
+        lastStatusMessage = event.message.trim();
+      }
     }
   }
 
@@ -73,11 +103,25 @@ export function createStreamingCollector(
     reset,
     handleEvent,
     getText: () => text,
+    getFailureHint: () => {
+      const parts: string[] = [];
+      if (lastErrorCode) {
+        parts.push(`errorCode=${lastErrorCode}`);
+      }
+      if (lastStatusMessage) {
+        parts.push(lastStatusMessage);
+      }
+      return parts.length > 0 ? parts.join(" · ") : undefined;
+    },
   };
 }
 
-function describeRunFailure(result: AriaRunResult, run: AriaRun): string {
-  const detail = result.result?.trim() || run.result?.trim();
+function describeRunFailure(
+  result: AriaRunResult,
+  run: AriaRun,
+  streamHint?: string,
+): string {
+  const detail = result.result?.trim() || run.result?.trim() || streamHint?.trim();
   if (detail) {
     return detail;
   }
@@ -85,12 +129,17 @@ function describeRunFailure(result: AriaRunResult, run: AriaRun): string {
 }
 
 export function isRecoverableRunError(err: unknown): boolean {
+  if (isAgentBusyError(err)) {
+    return true;
+  }
   if (!(err instanceof Error)) {
     return false;
   }
   const message = err.message.toLowerCase();
   return (
     message.includes("agent run failed") ||
+    message.includes("already has active run") ||
+    message.includes("agent busy after recovery") ||
     message.includes("network request failed") ||
     message.includes("network error") ||
     message.includes("service unavailable")
@@ -127,14 +176,53 @@ async function runChatTurnOnce(
       collector.handleEvent(event);
     }
     const result = await run.wait();
+    const modelId = result.model?.id ?? run.model?.id;
     if (result.status === "cancelled") {
+      recordRunUsage({
+        id: result.id,
+        status: "cancelled",
+        model: modelId,
+        durationMs: result.durationMs ?? run.durationMs,
+        requestId: result.requestId ?? run.requestId,
+        usage: result.usage as never,
+      });
       throw new ChatCancelledError(collector.getText().trim());
     }
     if (result.status === "error") {
-      const message = describeRunFailure(result, run);
-      console.error(`[aria-run] error run=${result.id}: ${message}`);
+      recordRunUsage({
+        id: result.id,
+        status: "error",
+        model: modelId,
+        durationMs: result.durationMs ?? run.durationMs,
+        requestId: result.requestId ?? run.requestId,
+        usage: result.usage as never,
+      });
+      const hint = collector.getFailureHint();
+      const message = describeRunFailure(result, run, hint);
+      console.error(
+        `[aria-run] error run=${result.id}: ${message}` +
+          ` model=${JSON.stringify(result.model ?? run.model ?? null)}` +
+          ` durationMs=${result.durationMs ?? run.durationMs ?? "?"}` +
+          ` requestId=${result.requestId ?? run.requestId ?? "?"}` +
+          (hint ? ` stream=${hint}` : "") +
+          ` resultJson=${JSON.stringify({
+            id: result.id,
+            status: result.status,
+            result: result.result ?? null,
+            usage: result.usage ?? null,
+          })}`,
+      );
       throw new Error(message);
     }
+
+    recordRunUsage({
+      id: result.id,
+      status: "finished",
+      model: modelId,
+      durationMs: result.durationMs ?? run.durationMs,
+      requestId: result.requestId ?? run.requestId,
+      usage: result.usage as never,
+    });
 
     const reply = collector.getText().trim();
     return reply || "(no reply)";

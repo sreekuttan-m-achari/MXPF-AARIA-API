@@ -1,5 +1,7 @@
 import type { AriaRun } from "./runtime/types.js";
 
+import { stopSpeech } from "./tts.js";
+
 const activeRuns = new Map<string, AriaRun>();
 
 export function registerActiveRun(chatId: string, run: AriaRun): void {
@@ -15,6 +17,7 @@ export function hasActiveRun(chatId: string): boolean {
 }
 
 export async function cancelActiveRun(chatId: string): Promise<boolean> {
+  stopSpeech();
   const run = activeRuns.get(chatId);
   if (!run) {
     return false;

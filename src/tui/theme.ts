@@ -84,3 +84,61 @@ export function learnTargetStyle(target: string): { label: string; color: string
       return { label: target, color: c.dim };
   }
 }
+
+const HEAT_GREEN = { r: 80, g: 200, b: 120 };
+const HEAT_ORANGE = { r: 245, g: 166, b: 35 };
+const HEAT_RED = { r: 230, g: 70, b: 70 };
+
+function clampPct(pct: number): number {
+  if (!Number.isFinite(pct)) return 0;
+  return Math.min(100, Math.max(0, pct));
+}
+
+function lerpChannel(a: number, b: number, t: number): number {
+  return Math.round(a + (b - a) * t);
+}
+
+function lerpRgb(
+  from: { r: number; g: number; b: number },
+  to: { r: number; g: number; b: number },
+  t: number,
+): { r: number; g: number; b: number } {
+  return {
+    r: lerpChannel(from.r, to.r, t),
+    g: lerpChannel(from.g, to.g, t),
+    b: lerpChannel(from.b, to.b, t),
+  };
+}
+
+/** Truecolor FG for pressure 0 (green) → 50 (orange) → 100 (red). */
+export function heatColor(pct: number): string {
+  const p = clampPct(pct);
+  const rgb =
+    p <= 50
+      ? lerpRgb(HEAT_GREEN, HEAT_ORANGE, p / 50)
+      : lerpRgb(HEAT_ORANGE, HEAT_RED, (p - 50) / 50);
+  return `\x1b[38;2;${rgb.r};${rgb.g};${rgb.b}m`;
+}
+
+function heatSegment(label: string, pct: number): string {
+  return `${c.italic}${heatColor(pct)}${label} ${Math.round(pct)}%${c.reset}`;
+}
+
+/**
+ * Italic post-reply / health footer: ctx · mem · user with per-metric heat.
+ * Leading newline is the caller's responsibility.
+ */
+export function formatHeatStatusLine(parts: {
+  ctxPct: number | null;
+  memPct: number;
+  userPct: number;
+}): string {
+  const sep = `${c.italic}${c.dim} · ${c.reset}`;
+  const ctx =
+    parts.ctxPct == null
+      ? `${c.italic}${c.dim}ctx —${c.reset}`
+      : heatSegment("ctx", parts.ctxPct);
+  const mem = heatSegment("mem", parts.memPct);
+  const user = heatSegment("user", parts.userPct);
+  return `${ctx}${sep}${mem}${sep}${user}`;
+}

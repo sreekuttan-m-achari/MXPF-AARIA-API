@@ -31,6 +31,7 @@ export function agentIdPath(
   return join(sessionDir(cwd), `agent-id.${runtime}.txt`);
 }
 
+/** Legacy path used before per-runtime files (Cursor only). */
 function legacyAgentIdPath(cwd: string): string {
   return join(sessionDir(cwd), "agent-id.txt");
 }
@@ -44,6 +45,7 @@ export function loadPersistedAgentId(
     const id = readFileSync(path, "utf8").trim();
     if (id.length > 0) return id;
   }
+  // Migrate pre-runtime Cursor session files.
   if (runtime === "cursor") {
     const legacy = legacyAgentIdPath(cwd);
     if (existsSync(legacy)) {

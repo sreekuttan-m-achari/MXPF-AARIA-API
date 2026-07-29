@@ -2,29 +2,42 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
-import { ensureServerReady, fetchHealth, systemdServiceName, type Health } from "./bootstrap.js";
+import { ensureServerReady, fetchHealth, resetSession, setVoiceMode, speakOnServer, backgroundServiceName, warmVoiceEngine, type Health } from "./bootstrap.js";
 import { AriaWsClient } from "./client.js";
 import {
+  commandLabel,
   completeLine,
   isBuiltinCommand,
   isMemoryCommand,
   isBareSkillCommand,
+  isSkillCommand,
   isSkillsCommand,
+  isVoiceCommand,
   looksLikeCommand,
   matchCommands,
+  parseSkillCommand,
+  resolveCommand,
   SLASH_COMMANDS,
 } from "./commands.js";
 import { TurnActivity } from "./activity.js";
 import { apiBase } from "./config.js";
 import { BootLoader } from "./loader.js";
 import { createPasteAwareInput, flushStdin } from "./paste-input.js";
-import { opsEnabled, pushChatHistory, runOpsMode } from "./ops/index.js";
-import { agentPrefix, ariaWordmark, c, formalTitleLine, learnTargetStyle, userPrefix } from "./theme.js";
-import { colorizeCommandLine, colorizeReplyChunk } from "./render.js";
+import { clearChatHistory, opsEnabled, pushChatHistory, runOpsMode } from "./ops/index.js";
+import {
+  agentPrefix,
+  ariaWordmark,
+  c,
+  formalTitleLine,
+  formatHeatStatusLine,
+  learnTargetStyle,
+  userPrefix,
+} from "./theme.js";
+import { colorizeCommandLine, colorizeReplyChunk, fitCommandHint } from "./render.js";
 
 function commandHelpLines(): string {
   return SLASH_COMMANDS.map((cmd) =>
-    colorizeCommandLine(cmd.name, cmd.summary),
+    colorizeCommandLine(commandLabel(cmd), cmd.summary),
   ).join("\n");
 }
 
@@ -37,7 +50,7 @@ ${commandHelpLines()}
 
 ${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for command suggestions · Tab to complete.
 Paste multiple lines as one message · end a line with \\ to continue on the next.
-${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable).
+${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (Health · Jobs · Memory · Chat · Cursor · Fleet) — set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable.
 Talk naturally for work tasks — code, DevOps, servers, planning.
 ${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 
@@ -63,7 +76,7 @@ async function main(): Promise<void> {
   let startedService = false;
   try {
     const ready = await ensureServerReady({
-      onStarting: () => loader.setPhase(`booting ${systemdServiceName()}`),
+      onStarting: () => loader.setPhase(`booting ${backgroundServiceName()}`),
       onWaiting: () => loader.setPhase("warming systems"),
     });
     health = ready.health;
@@ -82,9 +95,40 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  loader.setPhase("priming voice");
+  const voiceWarm = await warmVoiceEngine();
+  if (voiceWarm.ok && voiceWarm.ms && voiceWarm.ms > 0) {
+    loader.setPhase(`voice ready (${voiceWarm.ms}ms)`);
+  }
+
   const client = new AriaWsClient();
   let userName: string | undefined;
   let briefStreaming = false;
+  let spokeStartupGreeting = false;
+  let pendingGreeting: string | undefined;
+  let bootUiReady = false;
+
+  const presentGreeting = (text: string): void => {
+    const line = text.trim();
+    if (!line || spokeStartupGreeting) return;
+    spokeStartupGreeting = true;
+    output.write(`${agentPrefix()}${colorizeReplyChunk(line)}\n\n`);
+    void speakOnServer(line, "greeting");
+  };
+
+  const queueOrPresentGreeting = (text: string): void => {
+    const line = text.trim();
+    if (!line || spokeStartupGreeting) return;
+    if (bootUiReady) {
+      presentGreeting(line);
+      return;
+    }
+    pendingGreeting = line;
+  };
+
+  client.onGreeting((text) => {
+    queueOrPresentGreeting(text);
+  });
 
   client.onMorningBrief({
     onChunk: (text) => {
@@ -128,11 +172,12 @@ async function main(): Promise<void> {
     loader.stop();
     printBanner(health);
     if (startedService) {
-      output.write(`${c.dim}started aria-api.service${c.reset}\n`);
+      output.write(`${c.dim}started ${backgroundServiceName()}${c.reset}\n`);
     }
     const greeting = ready.greeting || health.greeting;
     if (greeting?.trim()) {
-      output.write(`${agentPrefix()}${colorizeReplyChunk(greeting.trim())}\n\n`);
+      // Defer until after help — show just above the user prompt.
+      pendingGreeting = greeting.trim();
     } else if (!health.warm) {
       output.write(`${c.gold}◌${c.reset} ${c.dim}Warming up…${c.reset}\n\n`);
     }
@@ -192,6 +237,8 @@ async function main(): Promise<void> {
   let continuation = "";
 
   let hintVisible = false;
+  /** How many rows below the prompt the last hint occupied (for full clear). */
+  let hintLineCount = 0;
   let opsOpen = false;
 
   // While the agent is working, pause readline so keystrokes are not echoed and
@@ -270,12 +317,17 @@ async function main(): Promise<void> {
     } finally {
       flushStdin(input);
       resetPromptInput();
+      // Re-enable bracketed paste in case Ink left the terminal without it.
+      if (output.isTTY) {
+        output.write("\x1b[?2004h");
+      }
       if (interactive && "setMuted" in readlineInput) {
         (readlineInput as { setMuted: (m: boolean) => void }).setMuted(false);
       }
       opsOpen = false;
       restoreReadlineTty();
       resumeInput();
+      // Banner on a fresh line under the restored chat transcript.
       output.write(`\n ${ariaWordmark()} ${c.dim}back to light TUI${c.reset}\n\n`);
       prompt();
     }
@@ -287,9 +339,51 @@ async function main(): Promise<void> {
     }
   };
 
+  let announcedDisconnect = false;
+  client.onConnection((state, detail) => {
+    if (closed) {
+      return;
+    }
+    if (state === "reconnecting") {
+      announcedDisconnect = true;
+      if (opsOpen) {
+        return;
+      }
+      output.write(
+        `\n${c.warn}◌ reconnecting…${c.reset}${detail ? ` ${c.dim}${detail}${c.reset}` : ""}\n`,
+      );
+      if (!streaming) {
+        prompt();
+      }
+      return;
+    }
+    if (state === "connected" && announcedDisconnect) {
+      announcedDisconnect = false;
+      if (opsOpen) {
+        return;
+      }
+      output.write(`\n${c.ok}● uplink restored${c.reset}\n`);
+      if (!streaming) {
+        prompt();
+      }
+    }
+  });
+
   const finishTurn = (): void => {
     activeTurn?.end();
     activeTurn = undefined;
+    streaming = false;
+    currentChatId = undefined;
+    resumeInput();
+    output.write("\n\n");
+    prompt();
+  };
+
+  /** End the spinner first, then print status — otherwise CLEAR_LINE wipes the message. */
+  const finishTurnWithMessage = (writeMsg: () => void): void => {
+    activeTurn?.end();
+    activeTurn = undefined;
+    writeMsg();
     streaming = false;
     currentChatId = undefined;
     resumeInput();
@@ -309,12 +403,21 @@ async function main(): Promise<void> {
 
   // Render a dim suggestion line just below the prompt while typing a command.
   // Uses DEC save/restore cursor so the input line is never disturbed.
+  // Hint text is kept to one row — wrapped hints cannot be erased cleanly on backspace.
   const clearHint = (): void => {
-    if (!hintVisible) {
+    if (!hintVisible && hintLineCount === 0) {
       return;
     }
-    output.write("\x1b7\n\x1b[2K\x1b8");
+    const rows = Math.max(hintLineCount, hintVisible ? 1 : 0);
+    if (rows > 0) {
+      output.write("\x1b7");
+      for (let i = 0; i < rows; i++) {
+        output.write("\n\x1b[2K");
+      }
+      output.write("\x1b8");
+    }
     hintVisible = false;
+    hintLineCount = 0;
   };
 
   /**
@@ -328,6 +431,9 @@ async function main(): Promise<void> {
     }
     clearHint();
     if (streaming && currentChatId) {
+      // Kill the spinner immediately so an idle timer cannot stack more
+      // "working…" lines while we wait for the cancel ack.
+      activeTurn?.end();
       output.write(`\n${c.dim}cancelling…${c.reset}\n`);
       client.cancel(currentChatId);
       return;
@@ -349,12 +455,17 @@ async function main(): Promise<void> {
       clearHint();
       return;
     }
-    const text =
+    // Erase any previous hint rows before painting (avoids ghost wrap lines).
+    clearHint();
+    const raw =
       matches.length === 1
-        ? `${c.cmd}${matches[0].name}${c.reset} ${c.dim}— ${matches[0].summary}${c.reset}`
-        : matches.map((cmd) => `${c.cmd}${cmd.name}${c.reset}`).join("  ");
+        ? `${c.cmd}${commandLabel(matches[0]!)}${c.reset} ${c.dim}— ${matches[0]!.summary}${c.reset}`
+        : matches.map((cmd) => `${c.cmd}${commandLabel(cmd)}${c.reset}`).join("  ");
+    const cols = output.columns && output.columns > 0 ? output.columns : 80;
+    const text = fitCommandHint(raw, cols);
     output.write(`\x1b7\n\x1b[2K${c.dim}${text}${c.reset}\x1b8`);
     hintVisible = true;
+    hintLineCount = 1;
   };
 
   if (interactive) {
@@ -372,6 +483,11 @@ async function main(): Promise<void> {
       }
       if (key?.ctrl && key.name === "o") {
         void openOps();
+        return;
+      }
+      // Bare Esc after ops must not disturb the prompt (Esc exits Ink and can
+      // still fire a light-mode keypress on some terminals).
+      if (key?.name === "escape" && !draftMessage) {
         return;
       }
       if (draftMessage && key?.name === "escape") {
@@ -444,8 +560,11 @@ async function main(): Promise<void> {
     text: string,
     options?: { alreadyDisplayed?: boolean },
   ): Promise<void> {
-    const lower = text.toLowerCase();
-      if (lower === "/quit" || lower === "/exit") {
+    const head = text.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+    const cmdName = resolveCommand(head)?.name;
+    let chatText = text;
+
+      if (cmdName === "/quit") {
         output.write(`${c.dim}bye${c.reset}\n`);
         closed = true;
         client.close();
@@ -453,13 +572,13 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (lower === "/help") {
+      if (cmdName === "/help") {
         printHelp();
         prompt();
         return;
       }
 
-      if (lower === "/health") {
+      if (cmdName === "/health") {
         try {
           const h = await fetchHealth();
           const mem =
@@ -474,8 +593,31 @@ async function main(): Promise<void> {
           const warm = h.warm
             ? `${c.ok}yes${c.reset}`
             : `${c.warn}no${c.reset}`;
+          const ctx = h.context;
+          let ctxLine = "";
+          if (ctx) {
+            const ctxPct =
+              ctx.window.percent != null && ctx.window.usedTokens != null
+                ? ctx.window.percent
+                : null;
+            const memPct = Math.round(
+              (ctx.prompts.memoryChars / Math.max(1, ctx.prompts.memoryLimit)) * 100,
+            );
+            const userPct = Math.round(
+              (ctx.prompts.userLearnedChars /
+                Math.max(1, ctx.prompts.userLearnedLimit)) *
+                100,
+            );
+            ctxLine =
+              `\n${formatHeatStatusLine({ ctxPct, memPct, userPct })}` +
+              `${c.dim} · standing ${ctx.prompts.standingChars}ch${c.reset}`;
+          }
           output.write(
-            `${c.ok}${c.bold}ok${c.reset} warm=${warm} persona=${h.persona ? c.ok + "yes" : c.dim + "no"}${c.reset}${mem}${learn} mcp=${h.mcp?.loaded ? c.teal + h.mcp.servers.join(", ") : c.dim + "off"}${c.reset}\n\n`,
+            `${c.ok}${c.bold}ok${c.reset} warm=${warm} persona=${h.persona ? c.ok + "yes" : c.dim + "no"}${c.reset}${mem}${learn} mcp=${h.mcp?.loaded ? c.teal + h.mcp.servers.join(", ") : c.dim + "off"}${c.reset}${ctxLine}` +
+              (h.voice
+                ? `\n${c.dim}voice ${h.voice.enabled ? "on" : "off"} · ${h.voice.engine}${c.reset}`
+                : "") +
+              `\n\n`,
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -485,7 +627,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (lower === "/ops") {
+      if (cmdName === "/ops") {
         await openOps();
         return;
       }
@@ -505,7 +647,22 @@ async function main(): Promise<void> {
         return;
       }
 
-      if (lower === "/cancel") {
+      if (isSkillCommand(text)) {
+        const loaded = await handleSkillLoadCommand(text);
+        if (!loaded) {
+          return;
+        }
+        // Canonicalize `/sk …` → `/skill …` for the server expand path.
+        const parsed = parseSkillCommand(text);
+        if (parsed) {
+          chatText = parsed.prompt
+            ? `/skill ${parsed.name} ${parsed.prompt}`
+            : `/skill ${parsed.name}`;
+        }
+        // Fall through to chat with the skill line (server expands).
+      }
+
+      if (cmdName === "/cancel") {
         if (streaming && currentChatId) {
           client.cancel(currentChatId);
           output.write(`${c.dim}cancel requested${c.reset}\n`);
@@ -513,6 +670,64 @@ async function main(): Promise<void> {
           output.write(`${c.dim}nothing to cancel${c.reset}\n\n`);
           prompt();
         }
+        return;
+      }
+
+      if (isVoiceCommand(text)) {
+        const parts = text.trim().split(/\s+/);
+        const sub = (parts[1] ?? "toggle").toLowerCase();
+        const action =
+          sub === "on" || sub === "off" || sub === "toggle" ? sub : null;
+        if (!action) {
+          output.write(
+            `${c.warn}usage:${c.reset} ${c.cmd}/voice${c.reset} · ${c.cmd}/voice on${c.reset} · ${c.cmd}/voice off${c.reset}\n\n`,
+          );
+          prompt();
+          return;
+        }
+        try {
+          const v = await setVoiceMode(action);
+          const state = v.enabled
+            ? `${c.ok}on${c.reset}`
+            : `${c.warn}off${c.reset}`;
+          output.write(
+            `${c.dim}voice${c.reset} ${state} · engine=${v.engine} · ${c.dim}${v.source}${c.reset}\n\n`,
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          output.write(`${c.err}voice: ${msg}${c.reset}\n\n`);
+        }
+        prompt();
+        return;
+      }
+
+      if (cmdName === "/new") {
+        if (streaming && currentChatId) {
+          client.cancel(currentChatId);
+          output.write(`${c.dim}cancelling current reply before reset…${c.reset}\n`);
+        }
+        output.write(`${c.dim}starting fresh session…${c.reset}\n`);
+        try {
+          const result = await resetSession();
+          clearChatHistory();
+          const sid = result.sessionId ?? "?";
+          output.write(
+            `${c.ok}new session${c.reset} ${c.dim}${sid}${c.reset}` +
+              (result.previousSessionId
+                ? ` ${c.dim}(was ${result.previousSessionId})${c.reset}`
+                : "") +
+              `\n`,
+          );
+          if (result.greeting?.trim()) {
+            output.write(`${agentPrefix()}${result.greeting.trim()}\n\n`);
+          } else {
+            output.write(`\n`);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          output.write(`${c.err}session reset failed: ${msg}${c.reset}\n\n`);
+        }
+        prompt();
         return;
       }
 
@@ -537,40 +752,66 @@ async function main(): Promise<void> {
       suspendInput();
 
       // readline already echoed normal typed lines; only print for paste-draft sends.
-      if (!text.startsWith("/") && !options?.alreadyDisplayed) {
-        output.write(`\n${userPrefix(userName)}${text}\n`);
+      if (!chatText.startsWith("/") && !options?.alreadyDisplayed) {
+        output.write(`\n${userPrefix(userName)}${chatText}\n`);
       }
-      pushChatHistory("user", text);
+      pushChatHistory("user", chatText);
 
       const turn = new TurnActivity();
       activeTurn = turn;
       turn.begin();
 
       try {
-        currentChatId = client.sendChat(text, {
+        if (!client.connected) {
+          await client.ensureConnected();
+        }
+        currentChatId = client.sendChat(chatText, {
           onChunk: (chunk) => {
             turn.onChunk(chunk);
           },
-          onDone: (reply) => {
-            if (!turn.hasContent) {
-              output.write(`${agentPrefix()}${c.dim}(no reply)${c.reset}`);
-            } else if (reply?.trim()) {
-              pushChatHistory("assistant", reply);
-            }
-            finishTurn();
+          onDone: (reply, context) => {
+            finishTurnWithMessage(() => {
+              if (!turn.hasContent) {
+                output.write(`${agentPrefix()}${c.dim}(no reply)${c.reset}`);
+              } else if (reply?.trim()) {
+                pushChatHistory("assistant", reply);
+              }
+              if (context) {
+                const ctxPct =
+                  context.window.percent != null &&
+                  context.window.usedTokens != null
+                    ? context.window.percent
+                    : null;
+                const memPct = Math.round(
+                  (context.prompts.memoryChars /
+                    Math.max(1, context.prompts.memoryLimit)) *
+                    100,
+                );
+                const userPct = Math.round(
+                  (context.prompts.userLearnedChars /
+                    Math.max(1, context.prompts.userLearnedLimit)) *
+                    100,
+                );
+                output.write(
+                  `\n${formatHeatStatusLine({ ctxPct, memPct, userPct })}`,
+                );
+              }
+            });
           },
           onCancelled: (partial) => {
-            if (partial) {
-              output.write(`\n${c.dim}(cancelled)${c.reset}`);
-              pushChatHistory("assistant", partial);
-            } else {
-              output.write(`\n${c.dim}cancelled${c.reset}`);
-            }
-            finishTurn();
+            finishTurnWithMessage(() => {
+              if (partial) {
+                output.write(`${c.dim}(cancelled)${c.reset}`);
+                pushChatHistory("assistant", partial);
+              } else {
+                output.write(`${c.dim}cancelled${c.reset}`);
+              }
+            });
           },
           onError: (message) => {
-            output.write(`\n${c.err}${message}${c.reset}`);
-            finishTurn();
+            finishTurnWithMessage(() => {
+              output.write(`${c.err}${message}${c.reset}`);
+            });
           },
         });
       } catch (err) {
@@ -696,6 +937,54 @@ async function main(): Promise<void> {
     }
   }
 
+  async function handleSkillLoadCommand(text: string): Promise<boolean> {
+    const parsed = parseSkillCommand(text);
+    if (!parsed) {
+      output.write(
+        `${c.warn}usage:${c.reset} ${c.cmd}/skill <name> [prompt]${c.reset}\n\n`,
+      );
+      prompt();
+      return false;
+    }
+    try {
+      const res = await fetch(`${apiBase()}/skills`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) {
+        throw new Error(`/skills returned ${res.status}`);
+      }
+      const body = (await res.json()) as {
+        skills?: { count: number; names: string[]; path: string };
+      };
+      const names = body.skills?.names ?? [];
+      const match = names.find(
+        (n) => n.toLowerCase() === parsed.name.toLowerCase(),
+      );
+      if (!match) {
+        output.write(
+          `${c.err}unknown skill ${parsed.name}${c.reset}` +
+            (names.length
+              ? `${c.dim} — try: ${names.slice(0, 8).join(", ")}${names.length > 8 ? "…" : ""}${c.reset}`
+              : `${c.dim} — no skills installed${c.reset}`) +
+            `\n\n`,
+        );
+        prompt();
+        return false;
+      }
+      output.write(
+        `${c.dim}loading skill${c.reset} ${c.gold}${match}${c.reset}` +
+          (parsed.prompt ? `${c.dim} · ${parsed.prompt.slice(0, 60)}${parsed.prompt.length > 60 ? "…" : ""}${c.reset}` : "") +
+          `\n`,
+      );
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(`${c.err}${msg}${c.reset}\n\n`);
+      prompt();
+      return false;
+    }
+  }
+
   async function handleSkillHelpCommand(): Promise<void> {
     output.write(
       `${c.dim}usage:${c.reset} ${c.cmd}/skill <name> [prompt]${c.reset}\n` +
@@ -775,6 +1064,11 @@ async function main(): Promise<void> {
   });
 
   printHelp();
+  bootUiReady = true;
+  if (pendingGreeting) {
+    presentGreeting(pendingGreeting);
+    pendingGreeting = undefined;
+  }
   prompt();
 }
 

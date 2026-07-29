@@ -6,5 +6,12 @@ dist/
 SOUL.md
 USER.md
 MEMORY.md
+FLEET.md
 .aria-learn-pending.json
 .cursor/mcp.json
+.superpowers/
+data/
+# Host-specific / private ops skills (do not publish)
+skills/ironss-maximprof-astra-sudo/
+
+.DS_Store

@@ -15,12 +15,42 @@ export type Health = {
   user?: string;
   learn?: { review: boolean };
   memoryStats?: { entries: number; chars: number; limit: number };
+  context?: {
+    window: {
+      usedTokens: number | null;
+      limitTokens: number;
+      percent: number | null;
+      model?: string;
+    };
+    prompts: {
+      soulChars: number;
+      userChars: number;
+      userLearnedChars: number;
+      userLearnedLimit: number;
+      memoryChars: number;
+      memoryLimit: number;
+      memoryEntries: number;
+      fleetChars: number;
+      standingChars: number;
+    };
+  };
+  voice?: { enabled: boolean; engine: string; source: string };
   mcp?: { loaded: boolean; servers: string[] };
 };
 
 export function systemdServiceName(): string {
   const name = process.env.AARIA_SYSTEMD_SERVICE?.trim();
   return name && name.length > 0 ? name : "aria-api.service";
+}
+
+export function launchdLabel(): string {
+  const name = process.env.AARIA_LAUNCHD_LABEL?.trim();
+  return name && name.length > 0 ? name : "com.aaria.api";
+}
+
+/** Platform-specific background service name for loader / status text. */
+export function backgroundServiceName(): string {
+  return process.platform === "darwin" ? launchdLabel() : systemdServiceName();
 }
 
 export async function fetchHealth(): Promise<Health> {
@@ -31,6 +61,109 @@ export async function fetchHealth(): Promise<Health> {
     throw new Error(`/health returned ${res.status}`);
   }
   return (await res.json()) as Health;
+}
+
+export type SessionResetResult = {
+  ok: boolean;
+  previousSessionId?: string;
+  sessionId?: string;
+  warm?: boolean;
+  greeting?: string;
+  error?: string;
+};
+
+/** Dispose the stuck Cursor session and create a fresh one (server-side). */
+export async function resetSession(): Promise<SessionResetResult> {
+  const res = await fetch(`${apiBase()}/session/reset`, {
+    method: "POST",
+    signal: AbortSignal.timeout(90_000),
+  });
+  const body = (await res.json()) as SessionResetResult;
+  if (!res.ok || !body.ok) {
+    throw new Error(body.error ?? `/session/reset returned ${res.status}`);
+  }
+  return body;
+}
+
+export type VoiceStatusResult = {
+  ok: boolean;
+  enabled: boolean;
+  engine: string;
+  source: string;
+  error?: string;
+};
+
+export async function fetchVoiceStatus(): Promise<VoiceStatusResult> {
+  const res = await fetch(`${apiBase()}/voice`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  const body = (await res.json()) as VoiceStatusResult;
+  if (!res.ok || body.error) {
+    throw new Error(body.error ?? `/voice returned ${res.status}`);
+  }
+  return body;
+}
+
+export async function setVoiceMode(
+  action: "on" | "off" | "toggle",
+): Promise<VoiceStatusResult> {
+  const res = await fetch(`${apiBase()}/voice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const body = (await res.json()) as VoiceStatusResult;
+  if (!res.ok || body.error) {
+    throw new Error(body.error ?? `/voice returned ${res.status}`);
+  }
+  return body;
+}
+
+/** Speak text on the API host (fire-and-forget from the TUI). */
+export async function speakOnServer(
+  text: string,
+  kind: "greeting" | "raw" = "raw",
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${apiBase()}/voice/speak`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, kind }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { spoken?: boolean };
+    return Boolean(body.spoken);
+  } catch {
+    return false;
+  }
+}
+
+/** Pre-warm Piper on the API host so first spoken reply has low latency. */
+export async function warmVoiceEngine(): Promise<{
+  ok: boolean;
+  engine?: string;
+  ms?: number;
+  skipped?: boolean;
+}> {
+  try {
+    const res = await fetch(`${apiBase()}/voice/warmup`, {
+      method: "POST",
+      signal: AbortSignal.timeout(50_000),
+    });
+    if (!res.ok) {
+      return { ok: false };
+    }
+    return (await res.json()) as {
+      ok: boolean;
+      engine?: string;
+      ms?: number;
+      skipped?: boolean;
+    };
+  } catch {
+    return { ok: false };
+  }
 }
 
 function startServerViaSystemd(): Promise<void> {
@@ -66,6 +199,48 @@ function startServerViaSystemd(): Promise<void> {
   });
 }
 
+function startServerViaLaunchd(): Promise<void> {
+  const label = launchdLabel();
+  const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+  const target = `gui/${uid}/${label}`;
+  return new Promise((resolve, reject) => {
+    const child = spawn("launchctl", ["kickstart", "-k", target], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (err) => {
+      reject(new Error(`failed to run launchctl: ${err.message}`));
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const detail = stderr.trim();
+      reject(
+        new Error(
+          detail
+            ? `launchctl kickstart ${target}: ${detail}`
+            : `launchctl kickstart ${target} failed (exit ${code})`,
+        ),
+      );
+    });
+  });
+}
+
+function startBackgroundService(): Promise<void> {
+  if (process.platform === "darwin") {
+    return startServerViaLaunchd();
+  }
+  return startServerViaSystemd();
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -75,7 +250,7 @@ export type EnsureOptions = {
   onWaiting?: () => void;
 };
 
-/** Ensure the ARIA API is up; starts the systemd user service once if needed. */
+/** Ensure the ARIA API is up; starts the OS background service once if needed. */
 export async function ensureServerReady(
   options: EnsureOptions = {},
 ): Promise<{
@@ -94,7 +269,7 @@ export async function ensureServerReady(
   options.onStarting?.();
 
   try {
-    await startServerViaSystemd();
+    await startBackgroundService();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(

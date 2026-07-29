@@ -3,10 +3,12 @@ import http, { type IncomingMessage } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import { enqueueAgentWork } from "./agent-queue.js";
-import { getAgent } from "./agent-manager.js";
+import { getAgent, resetAgentSession } from "./agent-manager.js";
 import type { AriaAgent } from "./agent.js";
 import { handleChatTurn } from "./chat.js";
 import { getMcpServerNames } from "./config/mcp.js";
+import { buildCursorStatus } from "./cursor-status.js";
+import { resolveModelId } from "./config/model.js";
 import { isChatCancelled } from "./errors.js";
 import { curatorStatus, runCurator } from "./learn/curator.js";
 import { memoryUsage } from "./learn/memory-store.js";
@@ -20,8 +22,10 @@ import {
   rejectPending,
 } from "./learn/pending.js";
 import { learnReviewEnabled } from "./learn/review.js";
+import { buildContextStatus } from "./context-status.js";
 import { personaStatus, userCallName } from "./persona.js";
 import { skillsStatus } from "./skills/index.js";
+import { fleetStatus, getFleetBridge, listAgentsForApi } from "./fleet/index.js";
 import { cancelActiveRun } from "./runs.js";
 import {
   deliverMorningBriefIfDue,
@@ -35,6 +39,8 @@ import {
   schedulerStatus,
   triggerJob,
 } from "./scheduler/index.js";
+import { getTtsEngine, getVoiceStatus, setVoiceEnabled, speak, toggleVoice, warmVoice } from "./tts.js";
+import { buildGreetingSpeech } from "./spoken.js";
 import { getGreeting, isWarm, onGreetingReady } from "./warmup.js";
 
 type Inbound =
@@ -49,7 +55,7 @@ type Outbound =
   | { type: "brief_chunk"; text: string }
   | { type: "pong" }
   | { type: "chunk"; id: string; text: string }
-  | { type: "done"; id: string; reply: string }
+  | { type: "done"; id: string; reply: string; context?: ReturnType<typeof buildContextStatus> }
   | { type: "cancelled"; id: string; reply?: string }
   | { type: "error"; id?: string; error: string }
   | {
@@ -154,12 +160,13 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           user: userCallName(),
           learn: {
             review: learnReviewEnabled(),
-            model: process.env.AARIA_LEARN_MODEL?.trim() || "composer-2",
+            model: resolveModelId("AARIA_LEARN_MODEL"),
             curator,
           },
           memoryStats: persona.memoryPath
             ? { entries: mem.entries, chars: mem.chars, limit: mem.limit }
             : undefined,
+          context: buildContextStatus(),
           skills,
           mcp: {
             loaded: mcpServers.length > 0,
@@ -173,7 +180,14 @@ export async function startServer(agent: AriaAgent): Promise<void> {
             lastHeartbeat: jobs.lastHeartbeat,
           },
           morningBrief: brief,
+          voice: getVoiceStatus(),
         });
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/cursor") {
+        const status = await buildCursorStatus(currentAgent().agentId);
+        jsonResponse(res, 200, status);
         return;
       }
 
@@ -313,6 +327,223 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && req.url === "/fleet/health") {
+        jsonResponse(res, 200, { ok: true, ...fleetStatus() });
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/fleet/agents") {
+        const agents = await listAgentsForApi();
+        jsonResponse(res, 200, { ok: true, ...fleetStatus(), agents });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/fleet/approve") {
+        const bridge = getFleetBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "fleet disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const agentId = (body as { agentId?: string }).agentId?.trim() ?? "";
+        if (!agentId) {
+          jsonResponse(res, 400, { error: "agentId is required" });
+          return;
+        }
+        const labels = (body as { labels?: Record<string, string> }).labels;
+        const caps = (body as { caps?: string[] }).caps;
+        try {
+          const agent = await bridge.approve(agentId, labels, caps);
+          jsonResponse(res, 200, { ok: true, agent });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { ok: false, error });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/fleet/cmd") {
+        const bridge = getFleetBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "fleet disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const agentId = (body as { agentId?: string }).agentId?.trim() ?? "";
+        const action = (body as { action?: string }).action?.trim() ?? "";
+        const args = (body as { args?: Record<string, unknown> }).args ?? {};
+        if (!agentId || !action) {
+          jsonResponse(res, 400, {
+            error: "agentId and action are required",
+          });
+          return;
+        }
+        try {
+          const result = await bridge.dispatchCmd(agentId, action, args);
+          jsonResponse(res, 200, { ok: true, ...result });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 400, { ok: false, error });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/fleet/update") {
+        const bridge = getFleetBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "fleet disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const raw = body as {
+          agentIds?: string[] | "all" | string;
+          agentId?: string;
+          refreshHost?: boolean;
+          reinstall?: boolean;
+          skipPull?: boolean;
+        };
+        let agentIds: string[] | "all" | undefined;
+        if (raw.agentIds === "all" || raw.agentId === "all") {
+          agentIds = "all";
+        } else if (Array.isArray(raw.agentIds)) {
+          agentIds = raw.agentIds;
+        } else if (typeof raw.agentIds === "string" && raw.agentIds.trim()) {
+          agentIds = raw.agentIds.split(/[\s,]+/).filter(Boolean);
+        } else if (typeof raw.agentId === "string" && raw.agentId.trim()) {
+          agentIds = [raw.agentId.trim()];
+        } else {
+          agentIds = "all";
+        }
+        try {
+          const result = await bridge.updateAgents({
+            agentIds,
+            refreshHost: raw.refreshHost === true,
+            reinstall: raw.reinstall === true,
+            skipPull: raw.skipPull === true,
+          });
+          jsonResponse(res, 200, result);
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { ok: false, error });
+        }
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/voice") {
+        jsonResponse(res, 200, { ok: true, ...getVoiceStatus() });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/voice") {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const raw = (body as { enabled?: unknown; action?: string }).enabled;
+        const action = (body as { action?: string }).action?.trim().toLowerCase();
+        let status;
+        if (action === "toggle" || (raw === undefined && !action)) {
+          status = toggleVoice();
+        } else if (
+          raw === true ||
+          raw === 1 ||
+          raw === "1" ||
+          raw === "on" ||
+          raw === "true" ||
+          action === "on"
+        ) {
+          status = setVoiceEnabled(true);
+        } else if (
+          raw === false ||
+          raw === 0 ||
+          raw === "0" ||
+          raw === "off" ||
+          raw === "false" ||
+          action === "off"
+        ) {
+          status = setVoiceEnabled(false);
+        } else {
+          jsonResponse(res, 400, {
+            ok: false,
+            error: "pass enabled:true|false or action:on|off|toggle",
+          });
+          return;
+        }
+        jsonResponse(res, 200, { ok: true, ...status });
+        return;
+      }
+
+      if (
+        (req.method === "POST" || req.method === "GET") &&
+        (req.url === "/voice/warmup" || req.url?.startsWith("/voice/warmup?"))
+      ) {
+        const force =
+          req.url.includes("force=1") || req.url.includes("force=true");
+        const result = await warmVoice(force);
+        jsonResponse(res, 200, {
+          ok: result.ok,
+          engine: result.engine ?? getTtsEngine(),
+          ms: result.ms,
+          skipped: result.skipped ?? false,
+        });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/voice/speak") {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const text = (body as { text?: string }).text?.trim() ?? "";
+        const kind = (body as { kind?: string }).kind?.trim() || "raw";
+        if (!text) {
+          jsonResponse(res, 400, { error: "text is required" });
+          return;
+        }
+        if (getTtsEngine() === "off") {
+          jsonResponse(res, 200, { ok: false, spoken: false, engine: "off" });
+          return;
+        }
+        const line =
+          kind === "greeting" ? buildGreetingSpeech(text) : text;
+        if (!line) {
+          jsonResponse(res, 200, { ok: false, spoken: false, engine: getTtsEngine() });
+          return;
+        }
+        speak(line);
+        jsonResponse(res, 200, {
+          ok: true,
+          spoken: true,
+          engine: getTtsEngine(),
+          chars: line.length,
+        });
+        return;
+      }
+
       if (req.method === "POST" && req.url === "/chat/cancel") {
         let body: unknown;
         try {
@@ -328,6 +559,24 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         }
         const cancelled = await cancelActiveRun(id);
         jsonResponse(res, 200, { ok: true, cancelled, id });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/session/reset") {
+        try {
+          const previousId = currentAgent().agentId;
+          const agent = await resetAgentSession();
+          jsonResponse(res, 200, {
+            ok: true,
+            previousSessionId: previousId,
+            sessionId: agent.agentId,
+            warm: isWarm(),
+            greeting: getGreeting(),
+          });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { ok: false, error });
+        }
         return;
       }
 
@@ -359,7 +608,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
               sseWrite(res, { type: "chunk", id, text });
             }),
           );
-          sseWrite(res, { type: "done", id, reply });
+          sseWrite(res, { type: "done", id, reply, context: buildContextStatus() });
         } catch (err) {
           if (isChatCancelled(err)) {
             sseWrite(res, {
@@ -512,7 +761,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
               send(ws, { type: "chunk", id, text });
             }),
           );
-          send(ws, { type: "done", id, reply });
+          send(ws, { type: "done", id, reply, context: buildContextStatus() });
         } catch (err) {
           if (isChatCancelled(err)) {
             send(ws, {
@@ -535,9 +784,11 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   });
 
   console.error(`[aria-server] ws://${host}:${port}`);
-  console.error(`[aria-server] GET /health  GET /heartbeat  GET /jobs  POST /jobs/run  POST /jobs/reload`);
+  console.error(`[aria-server] GET /health  GET /cursor  GET /heartbeat  GET /jobs  POST /jobs/run  POST /jobs/reload`);
   console.error(`[aria-server] GET /memory/pending  POST /memory/approve  POST /memory/reject  POST /memory/curate  GET /skills`);
-  console.error(`[aria-server] POST /chat  POST /chat/cancel  POST /chat/stream`);
+  console.error(`[aria-server] GET /fleet/health  GET /fleet/agents  POST /fleet/approve  POST /fleet/cmd  POST /fleet/update`);
+  console.error(`[aria-server] POST /voice/warmup  POST /voice/speak  GET|POST /voice  POST /chat  POST /chat/cancel  POST /chat/stream`);
+  console.error(`[aria-server] POST /session/reset`);
 
   await new Promise<void>((resolve) => {
     const shutdown = (): void => {
