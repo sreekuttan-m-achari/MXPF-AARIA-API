@@ -90,8 +90,39 @@ describe("slash command shortcuts", () => {
     assert.equal(isFilesCommand("/browse"), true);
     assert.equal(isFilesCommand("/files ~/WORKS"), true);
     assert.equal(isFilesCommand("/f C:\\Users"), true);
-    assert.deepEqual(parseFilesCommand("/files"), {});
-    assert.deepEqual(parseFilesCommand("/f ~/src"), { startPath: "~/src" });
-    assert.deepEqual(parseFilesCommand("/browse /tmp"), { startPath: "/tmp" });
+    assert.deepEqual(parseFilesCommand("/files"), { mode: "local" });
+    assert.deepEqual(parseFilesCommand("/f ~/src"), {
+      mode: "local",
+      startPath: "~/src",
+    });
+    assert.deepEqual(parseFilesCommand("/browse /tmp"), {
+      mode: "local",
+      startPath: "/tmp",
+    });
+  });
+
+  it("parses /files remote and @agent forms", () => {
+    assert.deepEqual(parseFilesCommand("/files remote"), { mode: "remote" });
+    assert.deepEqual(parseFilesCommand("/files remote astra-vmi548194"), {
+      mode: "remote",
+      agentId: "astra-vmi548194",
+    });
+    assert.deepEqual(
+      parseFilesCommand("/files remote astra-vmi548194 /var/www"),
+      {
+        mode: "remote",
+        agentId: "astra-vmi548194",
+        startPath: "/var/www",
+      },
+    );
+    assert.deepEqual(parseFilesCommand("/files remote /var/www"), {
+      mode: "remote",
+      startPath: "/var/www",
+    });
+    assert.deepEqual(parseFilesCommand("/f @astra-demo ~/x"), {
+      mode: "remote",
+      agentId: "astra-demo",
+      startPath: "~/x",
+    });
   });
 });

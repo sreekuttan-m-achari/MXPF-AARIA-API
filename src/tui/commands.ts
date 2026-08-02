@@ -15,7 +15,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "/files",
     aliases: ["/f", "/browse"],
-    summary: "File browser — multi-select paths for chat (also Ctrl+F)",
+    summary: "File browser — local/remote paths · e edits (also Ctrl+F)",
   },
   {
     name: "/memory",
@@ -143,21 +143,59 @@ export function isVoiceCommand(text: string): boolean {
   return /^\/(?:voice|v)(?:\s+\S+)?$/i.test(text.trim());
 }
 
-/** `/files|/f|/browse` with optional start directory. */
+/** `/files|/f|/browse` with optional start directory or remote target. */
 export function isFilesCommand(text: string): boolean {
   return /^\/(?:files|f|browse)(?:\s+\S[\s\S]*)?$/i.test(text.trim());
 }
 
-/** Parse `/files|/f|/browse [startDir]` — null if not a files command. */
-export function parseFilesCommand(text: string): { startPath?: string } | null {
+export type FilesCommandParse = {
+  mode: "local" | "remote";
+  agentId?: string;
+  startPath?: string;
+};
+
+/**
+ * Parse `/files` variants:
+ * - `/files [dir]`
+ * - `/files remote [agentId] [dir]`
+ * - `/files @agentId [dir]`
+ */
+export function parseFilesCommand(text: string): FilesCommandParse | null {
   const match = text
     .trim()
     .match(/^\/(?:files|f|browse)(?:\s+([\s\S]+))?$/i);
   if (!match) {
     return null;
   }
-  const startPath = match[1]?.trim();
-  return startPath ? { startPath } : {};
+  const rest = match[1]?.trim() ?? "";
+  if (!rest) {
+    return { mode: "local" };
+  }
+
+  const at = rest.match(/^@(\S+)(?:\s+([\s\S]+))?$/);
+  if (at) {
+    const out: FilesCommandParse = { mode: "remote", agentId: at[1] };
+    const startPath = at[2]?.trim();
+    if (startPath) out.startPath = startPath;
+    return out;
+  }
+
+  const remote = rest.match(/^remote(?:\s+(\S+))?(?:\s+([\s\S]+))?$/i);
+  if (remote) {
+    const maybeAgent = remote[1];
+    const maybePath = remote[2]?.trim();
+    // `/files remote /var/www` — first token looks like a path, not an agent id
+    if (maybeAgent && (maybeAgent.startsWith("/") || maybeAgent.startsWith("~"))) {
+      const startPath = [maybeAgent, maybePath].filter(Boolean).join(" ");
+      return { mode: "remote", startPath };
+    }
+    const out: FilesCommandParse = { mode: "remote" };
+    if (maybeAgent) out.agentId = maybeAgent;
+    if (maybePath) out.startPath = maybePath;
+    return out;
+  }
+
+  return { mode: "local", startPath: rest };
 }
 
 const EXACT_COMMANDS = new Set(allCommandNames());

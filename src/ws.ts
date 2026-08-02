@@ -384,6 +384,14 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         const agentId = (body as { agentId?: string }).agentId?.trim() ?? "";
         const action = (body as { action?: string }).action?.trim() ?? "";
         const args = (body as { args?: Record<string, unknown> }).args ?? {};
+        const wait = (body as { wait?: boolean }).wait === true;
+        const timeoutMsRaw = (body as { timeoutMs?: number }).timeoutMs;
+        const timeoutMs =
+          typeof timeoutMsRaw === "number" &&
+          Number.isFinite(timeoutMsRaw) &&
+          timeoutMsRaw > 0
+            ? Math.min(timeoutMsRaw, 120_000)
+            : 15_000;
         if (!agentId || !action) {
           jsonResponse(res, 400, {
             error: "agentId and action are required",
@@ -391,8 +399,18 @@ export async function startServer(agent: AriaAgent): Promise<void> {
           return;
         }
         try {
-          const result = await bridge.dispatchCmd(agentId, action, args);
-          jsonResponse(res, 200, { ok: true, ...result });
+          if (wait) {
+            const result = await bridge.dispatchCmdWait(
+              agentId,
+              action,
+              args,
+              timeoutMs,
+            );
+            jsonResponse(res, 200, { ok: true, ...result });
+          } else {
+            const result = await bridge.dispatchCmd(agentId, action, args);
+            jsonResponse(res, 200, { ok: true, ...result });
+          }
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
           jsonResponse(res, 400, { ok: false, error });

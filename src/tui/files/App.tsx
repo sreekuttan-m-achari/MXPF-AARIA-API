@@ -9,50 +9,96 @@ import {
   type DirEntry,
 } from "./fs.js";
 
+export type BrowserSession = {
+  cwd: string;
+  selected: string[];
+  showHidden: boolean;
+  cursorName?: string;
+};
+
+export type BrowserOutcome =
+  | { action: "cancel" }
+  | { action: "confirm"; paths: string[] }
+  | { action: "edit"; path: string; session: BrowserSession };
+
 export type FileBrowserAppProps = {
-  startDir: string;
-  /** Called with absolute paths on confirm, or null on cancel. */
-  onDone: (paths: string[] | null) => void;
+  session: BrowserSession;
+  /** Optional subtitle (e.g. remote agent id). */
+  subtitle?: string;
+  listEntriesFn?: typeof listEntries;
+  displayPathFn?: (p: string) => string;
+  parentDirFn?: typeof parentDir;
+  onDone: (outcome: BrowserOutcome) => void;
 };
 
 const VIEWPORT = 16;
 
-export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React.ReactElement {
+export function FileBrowserApp({
+  session,
+  subtitle,
+  listEntriesFn = listEntries,
+  displayPathFn = displayPath,
+  parentDirFn = parentDir,
+  onDone,
+}: FileBrowserAppProps): React.ReactElement {
   const { exit } = useApp();
-  const [cwd, setCwd] = useState(startDir);
+  const [cwd, setCwd] = useState(session.cwd);
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [cursor, setCursor] = useState(0);
-  const [selected, setSelected] = useState<Set<string>>(() => new Set());
-  const [showHidden, setShowHidden] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(session.selected),
+  );
+  const [showHidden, setShowHidden] = useState(session.showHidden);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState<string | null>(null);
+
+  const snapshot = useCallback((): BrowserSession => {
+    const entry = entries[cursor];
+    return {
+      cwd,
+      selected: [...selected],
+      showHidden,
+      cursorName: entry?.name,
+    };
+  }, [cwd, selected, showHidden, entries, cursor]);
 
   const finish = useCallback(
-    (paths: string[] | null) => {
-      onDone(paths);
+    (outcome: BrowserOutcome) => {
+      onDone(outcome);
       exit();
     },
     [exit, onDone],
   );
 
-  const reload = useCallback(async (dir: string, keepHidden: boolean) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const list = await listEntries(dir, { showHidden: keepHidden });
-      setEntries(list);
-      setCursor(0);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setEntries([]);
-      setError(msg);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const reload = useCallback(
+    async (dir: string, keepHidden: boolean, preferName?: string) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const list = await listEntriesFn(dir, { showHidden: keepHidden });
+        setEntries(list);
+        if (preferName) {
+          const idx = list.findIndex((e) => e.name === preferName);
+          setCursor(idx >= 0 ? idx : 0);
+        } else {
+          setCursor(0);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setEntries([]);
+        setError(msg);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [listEntriesFn],
+  );
 
   useEffect(() => {
-    void reload(cwd, showHidden);
+    void reload(cwd, showHidden, session.cursorName);
+    // Only on mount / cwd / hidden — not when cursorName changes mid-session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
   }, [cwd, showHidden, reload]);
 
   const selectedList = useMemo(
@@ -84,15 +130,17 @@ export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React
 
   const confirm = useCallback(() => {
     if (selected.size > 0) {
-      finish([...selected].sort((a, b) => a.localeCompare(b)));
+      finish({
+        action: "confirm",
+        paths: [...selected].sort((a, b) => a.localeCompare(b)),
+      });
       return;
     }
     const entry = entries[cursor];
     if (entry && !entry.isDirectory) {
-      finish([entry.absolutePath]);
+      finish({ action: "confirm", paths: [entry.absolutePath] });
       return;
     }
-    // Nothing useful selected — stay in picker.
   }, [selected, entries, cursor, finish]);
 
   const openOrConfirm = useCallback(() => {
@@ -109,28 +157,42 @@ export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React
       confirm();
       return;
     }
-    finish([entry.absolutePath]);
+    finish({ action: "confirm", paths: [entry.absolutePath] });
   }, [entries, cursor, selected.size, confirm, finish]);
 
-  useInput((input, key) => {
-    if (key.escape || input === "q") {
-      finish(null);
+  const requestEdit = useCallback(() => {
+    const entry = entries[cursor];
+    if (!entry || entry.isDirectory) {
+      setStatus("select a file to edit (e)");
       return;
     }
-    if (key.ctrl && input === "c") {
-      finish(null);
+    finish({ action: "edit", path: entry.absolutePath, session: snapshot() });
+  }, [entries, cursor, finish, snapshot]);
+
+  useInput((inputKey, key) => {
+    if (key.escape || inputKey === "q") {
+      finish({ action: "cancel" });
       return;
     }
-    if (input === ".") {
+    if (key.ctrl && inputKey === "c") {
+      finish({ action: "cancel" });
+      return;
+    }
+    if (inputKey === ".") {
       setShowHidden((v) => !v);
       return;
     }
-    if (input === "c") {
+    if (inputKey === "c") {
       setSelected(new Set());
+      setStatus(null);
       return;
     }
-    if (input === "-" || key.backspace) {
-      const parent = parentDir(cwd);
+    if (inputKey === "e" || inputKey === "v") {
+      requestEdit();
+      return;
+    }
+    if (inputKey === "-" || key.backspace) {
+      const parent = parentDirFn(cwd);
       if (parent) {
         setCwd(parent);
       }
@@ -138,21 +200,22 @@ export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React
     }
     if (key.upArrow) {
       setCursor((i) => Math.max(0, i - 1));
+      setStatus(null);
       return;
     }
     if (key.downArrow) {
       setCursor((i) => Math.min(Math.max(0, entries.length - 1), i + 1));
+      setStatus(null);
       return;
     }
-    if (input === " ") {
+    if (inputKey === " ") {
       const entry = entries[cursor];
       if (entry) {
         toggleSelect(entry);
       }
       return;
     }
-    // Ctrl+Enter is not portable across terminals; use 'a' to accept selection.
-    if (input === "a" || (key.ctrl && key.return)) {
+    if (inputKey === "a" || (key.ctrl && key.return)) {
       confirm();
       return;
     }
@@ -161,7 +224,7 @@ export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React
     }
   });
 
-  const hasParent = parentDir(cwd) !== null;
+  const hasParent = parentDirFn(cwd) !== null;
 
   return (
     <Box flexDirection="column" paddingX={1} paddingY={0}>
@@ -169,12 +232,15 @@ export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React
         <Text bold color="cyan">
           Files
         </Text>
-        <Text dimColor> · share paths with AARIA</Text>
+        <Text dimColor>
+          {subtitle ? ` · ${subtitle}` : " · share paths with AARIA"}
+        </Text>
       </Box>
       <Box marginTop={0}>
         <Text dimColor>cwd </Text>
-        <Text color="magenta">{displayPath(cwd)}</Text>
+        <Text color="magenta">{displayPathFn(cwd)}</Text>
       </Box>
+      {status ? <Text color="yellow">{status}</Text> : null}
       {error ? (
         <Text color="red">{error}</Text>
       ) : loading ? (
@@ -194,7 +260,11 @@ export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React
             const kind = entry.isDirectory ? "/" : entry.isSymlink ? "@" : " ";
             const label = `${entry.name}${entry.isDirectory ? path.sep : ""}`;
             return (
-              <Text key={entry.absolutePath} inverse={active} color={entry.isDirectory ? "cyan" : undefined}>
+              <Text
+                key={entry.absolutePath}
+                inverse={active}
+                color={entry.isDirectory ? "cyan" : undefined}
+              >
                 {active ? "›" : " "}
                 {marker} {kind}
                 {label}
@@ -203,14 +273,15 @@ export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React
           })}
           {entries.length > VIEWPORT && (
             <Text dimColor>
-              {scrollOffset + 1}–{Math.min(scrollOffset + VIEWPORT, entries.length)} / {entries.length}
+              {scrollOffset + 1}–{Math.min(scrollOffset + VIEWPORT, entries.length)} /{" "}
+              {entries.length}
             </Text>
           )}
         </Box>
       )}
       <Box marginTop={1} flexDirection="column">
         <Text dimColor>
-          ↑↓ move · Space select · Enter open/pick · a accept · - parent · . hidden · c clear · q Esc cancel
+          ↑↓ move · Space select · Enter open · e edit · a accept · - parent · . hidden · q cancel
         </Text>
         <Text>
           <Text dimColor>selected </Text>
@@ -218,7 +289,7 @@ export function FileBrowserApp({ startDir, onDone }: FileBrowserAppProps): React
           {selectedList.length > 0 && (
             <Text dimColor>
               {" "}
-              · {selectedList.slice(0, 3).map(displayPath).join(" · ")}
+              · {selectedList.slice(0, 3).map(displayPathFn).join(" · ")}
               {selectedList.length > 3 ? "…" : ""}
             </Text>
           )}

@@ -45,7 +45,15 @@ export async function listFleetAgentsView(): Promise<FleetAgentView[]> {
   return agents.map(toFleetAgentView);
 }
 
-const DEFAULT_APPROVE_CAPS = ["health", "exec", "host", "update"];
+const DEFAULT_APPROVE_CAPS = ["health", "exec", "fs", "host", "update"];
+
+export type FleetCmdResult = {
+  jobId: string;
+  ok: boolean;
+  action: string;
+  data?: unknown;
+  error?: string;
+};
 
 export type FleetBridge = {
   bus: FleetBus;
@@ -60,11 +68,33 @@ export type FleetBridge = {
     action: string,
     args?: Record<string, unknown>,
   ) => Promise<{ jobId: string }>;
+  /** Dispatch and wait for MQTT result (or timeout). */
+  dispatchCmdWait: (
+    agentId: string,
+    action: string,
+    args?: Record<string, unknown>,
+    timeoutMs?: number,
+  ) => Promise<FleetCmdResult>;
   updateAgents: (opts?: FleetUpdateOptions) => Promise<FleetUpdateResult>;
   stop: () => Promise<void>;
 };
 
+type JobWaiter = {
+  resolve: (result: FleetCmdResult) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
+  const waiters = new Map<string, JobWaiter>();
+
+  const settleWaiter = (jobId: string, result: FleetCmdResult): void => {
+    const waiter = waiters.get(jobId);
+    if (!waiter) return;
+    waiters.delete(jobId);
+    clearTimeout(waiter.timer);
+    waiter.resolve(result);
+  };
   const onAnnounce = async (_topic: string, payload: Buffer) => {
     try {
       const env = parseEnvelope(payload);
@@ -128,11 +158,20 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
     async (topic, payload) => {
       try {
         const env = parseEnvelope(payload);
-        await recordAgentResult(env.agentId, {
+        const resultPayload = {
           topic,
           jobId: env.id,
           ...env.payload,
           at: env.ts,
+        };
+        await recordAgentResult(env.agentId, resultPayload);
+        settleWaiter(env.id, {
+          jobId: env.id,
+          ok: env.payload.ok === true,
+          action: typeof env.payload.action === "string" ? env.payload.action : "",
+          data: env.payload.data,
+          error:
+            typeof env.payload.error === "string" ? env.payload.error : undefined,
         });
         console.error(
           `[fleet] result ${env.agentId} job=${env.id} ok=${String(env.payload.ok)}`,
@@ -159,15 +198,33 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
     const summary =
       action === "exec" && typeof args.cmd === "string"
         ? String(args.cmd).slice(0, 80)
-        : action === "host.profile" || action === "host"
-          ? "host profile"
-          : action === "self.update" || action === "update"
-            ? "self update"
-            : undefined;
+        : action.startsWith("fs.")
+          ? action
+          : action === "host.profile" || action === "host"
+            ? "host profile"
+            : action === "self.update" || action === "update"
+              ? "self update"
+              : undefined;
     await setCurrentJob(agentId, { jobId, action, summary });
     const env = makeEnvelope("cmd.exec", agentId, { action, args }, jobId);
     await bus.publish(topics.cmd(agentId), serializeEnvelope(env), 1);
     return { jobId };
+  };
+
+  const dispatchCmdWait = async (
+    agentId: string,
+    action: string,
+    args: Record<string, unknown> = {},
+    timeoutMs = 15_000,
+  ): Promise<FleetCmdResult> => {
+    const { jobId } = await dispatchCmd(agentId, action, args);
+    return new Promise<FleetCmdResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        waiters.delete(jobId);
+        reject(new Error(`fleet job timed out after ${timeoutMs}ms (${action})`));
+      }, timeoutMs);
+      waiters.set(jobId, { resolve, reject, timer });
+    });
   };
 
   return {
@@ -181,6 +238,9 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
       }
       if (!nextCaps.includes("update")) {
         nextCaps = [...nextCaps, "update"];
+      }
+      if (!nextCaps.includes("fs") && nextCaps.includes("exec")) {
+        nextCaps = [...nextCaps, "fs"];
       }
       if (nextCaps.length === 0) {
         nextCaps = DEFAULT_APPROVE_CAPS;
@@ -206,6 +266,7 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
       return record;
     },
     dispatchCmd,
+    dispatchCmdWait,
     async updateAgents(opts: FleetUpdateOptions = {}) {
       const { targets, missing } = await resolveUpdateTargets(opts);
       const jobs: FleetUpdateResult["jobs"] = [];
@@ -252,6 +313,11 @@ export async function startFleetBridge(bus: FleetBus): Promise<FleetBridge> {
       };
     },
     async stop() {
+      for (const [jobId, waiter] of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error("fleet bridge stopped"));
+        waiters.delete(jobId);
+      }
       await bus.end();
     },
   };

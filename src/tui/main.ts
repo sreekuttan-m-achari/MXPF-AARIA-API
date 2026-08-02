@@ -54,7 +54,7 @@ ${commandHelpLines()}
 ${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for command suggestions · Tab to complete.
 Paste multiple lines as one message · end a line with \\ to continue on the next.
 ${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (Health · Jobs · Memory · Chat · Cursor · Fleet) — set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable.
-${c.cmd}/files${c.reset}${c.dim} or ${c.cmd}Ctrl+F${c.reset}${c.dim} opens a multi-select file browser — paths land in the chat draft.
+${c.cmd}/files${c.reset}${c.dim} or ${c.cmd}Ctrl+F${c.reset}${c.dim} — local browser (${c.cmd}e${c.reset}${c.dim} = editor). ${c.cmd}/files remote${c.reset}${c.dim} or ${c.cmd}/files @agent${c.reset}${c.dim} — ASTRA remote.
 Talk naturally for work tasks — code, DevOps, servers, planning.
 ${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 
@@ -338,7 +338,11 @@ async function main(): Promise<void> {
     }
   };
 
-  const openFileBrowser = async (startPath?: string): Promise<void> => {
+  const openFileBrowser = async (opts?: {
+    mode?: "local" | "remote";
+    agentId?: string;
+    startPath?: string;
+  }): Promise<void> => {
     if (!interactive || opsOpen || filesOpen || closed) {
       return;
     }
@@ -358,7 +362,7 @@ async function main(): Promise<void> {
     }
     let selected: string[] | null = null;
     try {
-      selected = await runFileBrowser(startPath);
+      selected = await runFileBrowser(opts ?? {});
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       output.write(`${c.err}file browser exited: ${msg}${c.reset}\n`);
@@ -542,7 +546,7 @@ async function main(): Promise<void> {
         return;
       }
       if (key?.ctrl && key.name === "f") {
-        void openFileBrowser();
+        void openFileBrowser({ mode: "local" });
         return;
       }
       // Bare Esc after ops must not disturb the prompt (Esc exits Ink and can
@@ -699,8 +703,8 @@ async function main(): Promise<void> {
       }
 
       if (isFilesCommand(text) || cmdName === "/files") {
-        const parsed = parseFilesCommand(text);
-        await openFileBrowser(parsed?.startPath);
+        const parsed = parseFilesCommand(text) ?? { mode: "local" as const };
+        await openFileBrowser(parsed);
         return;
       }
 

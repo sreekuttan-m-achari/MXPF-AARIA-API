@@ -235,6 +235,30 @@ export async function fleetCmd(
   return postJson<{ jobId: string }>("/fleet/cmd", { agentId, action, args });
 }
 
+export type FleetCmdWaitResult = {
+  ok: boolean;
+  jobId: string;
+  action: string;
+  data?: unknown;
+  error?: string;
+};
+
+/** Dispatch a fleet command and wait for the MQTT result. */
+export async function fleetCmdWait(
+  agentId: string,
+  action: string,
+  args?: Record<string, unknown>,
+  timeoutMs = 15_000,
+): Promise<FleetCmdWaitResult> {
+  return postJson<FleetCmdWaitResult>("/fleet/cmd", {
+    agentId,
+    action,
+    args,
+    wait: true,
+    timeoutMs,
+  });
+}
+
 export type FleetUpdateResult = {
   ok: boolean;
   targeted: number;
