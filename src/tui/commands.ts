@@ -13,6 +13,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     summary: "Ops overlay (panels · metrics) — also Ctrl+O",
   },
   {
+    name: "/files",
+    aliases: ["/f", "/browse"],
+    summary: "File browser — multi-select paths for chat (also Ctrl+F)",
+  },
+  {
     name: "/memory",
     aliases: ["/m"],
     summary: "Memory learn loop (pending · approve · reject · curate)",
@@ -138,6 +143,23 @@ export function isVoiceCommand(text: string): boolean {
   return /^\/(?:voice|v)(?:\s+\S+)?$/i.test(text.trim());
 }
 
+/** `/files|/f|/browse` with optional start directory. */
+export function isFilesCommand(text: string): boolean {
+  return /^\/(?:files|f|browse)(?:\s+\S[\s\S]*)?$/i.test(text.trim());
+}
+
+/** Parse `/files|/f|/browse [startDir]` — null if not a files command. */
+export function parseFilesCommand(text: string): { startPath?: string } | null {
+  const match = text
+    .trim()
+    .match(/^\/(?:files|f|browse)(?:\s+([\s\S]+))?$/i);
+  if (!match) {
+    return null;
+  }
+  const startPath = match[1]?.trim();
+  return startPath ? { startPath } : {};
+}
+
 const EXACT_COMMANDS = new Set(allCommandNames());
 
 /** True for built-in slash commands (exact or /memory …). */
@@ -163,6 +185,9 @@ export function isBuiltinCommand(text: string): boolean {
     return true;
   }
   if (isVoiceCommand(trimmed)) {
+    return true;
+  }
+  if (isFilesCommand(trimmed)) {
     return true;
   }
   return looksLikeCommand(trimmed);

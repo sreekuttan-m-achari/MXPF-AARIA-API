@@ -8,6 +8,7 @@ import {
   commandLabel,
   completeLine,
   isBuiltinCommand,
+  isFilesCommand,
   isMemoryCommand,
   isBareSkillCommand,
   isSkillCommand,
@@ -15,6 +16,7 @@ import {
   isVoiceCommand,
   looksLikeCommand,
   matchCommands,
+  parseFilesCommand,
   parseSkillCommand,
   resolveCommand,
   SLASH_COMMANDS,
@@ -23,6 +25,7 @@ import { TurnActivity } from "./activity.js";
 import { apiBase } from "./config.js";
 import { BootLoader } from "./loader.js";
 import { createPasteAwareInput, flushStdin } from "./paste-input.js";
+import { runFileBrowser } from "./files/index.js";
 import { clearChatHistory, opsEnabled, pushChatHistory, runOpsMode } from "./ops/index.js";
 import {
   agentPrefix,
@@ -51,6 +54,7 @@ ${commandHelpLines()}
 ${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for command suggestions · Tab to complete.
 Paste multiple lines as one message · end a line with \\ to continue on the next.
 ${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (Health · Jobs · Memory · Chat · Cursor · Fleet) — set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable.
+${c.cmd}/files${c.reset}${c.dim} or ${c.cmd}Ctrl+F${c.reset}${c.dim} opens a multi-select file browser — paths land in the chat draft.
 Talk naturally for work tasks — code, DevOps, servers, planning.
 ${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 
@@ -240,6 +244,7 @@ async function main(): Promise<void> {
   /** How many rows below the prompt the last hint occupied (for full clear). */
   let hintLineCount = 0;
   let opsOpen = false;
+  let filesOpen = false;
 
   // While the agent is working, pause readline so keystrokes are not echoed and
   // stray Enters do not redraw the prompt mid-reply. Ctrl+C still routes via SIGINT.
@@ -292,7 +297,7 @@ async function main(): Promise<void> {
       prompt();
       return;
     }
-    if (!interactive || opsOpen || closed) {
+    if (!interactive || opsOpen || filesOpen || closed) {
       return;
     }
     if (streaming) {
@@ -333,6 +338,57 @@ async function main(): Promise<void> {
     }
   };
 
+  const openFileBrowser = async (startPath?: string): Promise<void> => {
+    if (!interactive || opsOpen || filesOpen || closed) {
+      return;
+    }
+    if (streaming) {
+      output.write(
+        `${c.warn}wait for the current reply (or /cancel) before opening files${c.reset}\n\n`,
+      );
+      prompt();
+      return;
+    }
+    filesOpen = true;
+    clearHint();
+    resetPromptInput();
+    suspendInput();
+    if (interactive && "setMuted" in readlineInput) {
+      (readlineInput as { setMuted: (m: boolean) => void }).setMuted(true);
+    }
+    let selected: string[] | null = null;
+    try {
+      selected = await runFileBrowser(startPath);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(`${c.err}file browser exited: ${msg}${c.reset}\n`);
+    } finally {
+      flushStdin(input);
+      resetPromptInput();
+      if (output.isTTY) {
+        output.write("\x1b[?2004h");
+      }
+      if (interactive && "setMuted" in readlineInput) {
+        (readlineInput as { setMuted: (m: boolean) => void }).setMuted(false);
+      }
+      filesOpen = false;
+      restoreReadlineTty();
+      resumeInput();
+    }
+
+    if (selected && selected.length > 0) {
+      const block = selected.join("\n");
+      draftMessage = draftMessage ? `${draftMessage.trimEnd()}\n${block}` : block;
+      const n = selected.length;
+      output.write(
+        `\n${c.dim}(${n} path${n === 1 ? "" : "s"} — Enter to send · type a note then Enter · Esc to clear)${c.reset}\n`,
+      );
+    } else {
+      output.write(`\n ${ariaWordmark()} ${c.dim}file browser cancelled${c.reset}\n\n`);
+    }
+    prompt();
+  };
+
   const prompt = (): void => {
     if (!closed) {
       rl.prompt();
@@ -346,7 +402,7 @@ async function main(): Promise<void> {
     }
     if (state === "reconnecting") {
       announcedDisconnect = true;
-      if (opsOpen) {
+      if (opsOpen || filesOpen) {
         return;
       }
       output.write(
@@ -359,7 +415,7 @@ async function main(): Promise<void> {
     }
     if (state === "connected" && announcedDisconnect) {
       announcedDisconnect = false;
-      if (opsOpen) {
+      if (opsOpen || filesOpen) {
         return;
       }
       output.write(`\n${c.ok}● uplink restored${c.reset}\n`);
@@ -471,7 +527,7 @@ async function main(): Promise<void> {
   if (interactive) {
     // readline listens on readlineInput (not raw stdin); hints must attach there too.
     readlineInput.prependListener("keypress", (_str, key) => {
-      if (opsOpen) {
+      if (opsOpen || filesOpen) {
         return;
       }
       // Even if readline is paused, keypress can still fire on some TTYs.
@@ -483,6 +539,10 @@ async function main(): Promise<void> {
       }
       if (key?.ctrl && key.name === "o") {
         void openOps();
+        return;
+      }
+      if (key?.ctrl && key.name === "f") {
+        void openFileBrowser();
         return;
       }
       // Bare Esc after ops must not disturb the prompt (Esc exits Ink and can
@@ -523,11 +583,17 @@ async function main(): Promise<void> {
       clearHint();
 
       if (draftMessage !== null) {
-        const text = draftMessage.trim();
+        const draft = draftMessage.trim();
+        const note = line.trim();
         draftMessage = null;
         continuation = "";
         rl.setPrompt(userPrefix(userName));
-        if (!text) {
+        if (!draft && !note) {
+          prompt();
+          return;
+        }
+        const text = note ? `${note}\n\n${draft}` : draft;
+        if (!text.trim()) {
           prompt();
           return;
         }
@@ -629,6 +695,12 @@ async function main(): Promise<void> {
 
       if (cmdName === "/ops") {
         await openOps();
+        return;
+      }
+
+      if (isFilesCommand(text) || cmdName === "/files") {
+        const parsed = parseFilesCommand(text);
+        await openFileBrowser(parsed?.startPath);
         return;
       }
 

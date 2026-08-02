@@ -4,10 +4,12 @@ import { describe, it } from "node:test";
 import {
   commandLabel,
   isBareSkillCommand,
+  isFilesCommand,
   isMemoryCommand,
   isSkillCommand,
   isSkillsCommand,
   isVoiceCommand,
+  parseFilesCommand,
   parseSkillCommand,
   resolveCommand,
   shortcutOf,
@@ -20,6 +22,8 @@ describe("slash command shortcuts", () => {
       "/h": "/help",
       "/hl": "/health",
       "/o": "/ops",
+      "/f": "/files",
+      "/browse": "/files",
       "/m": "/memory",
       "/ss": "/skills",
       "/sk": "/skill",
@@ -42,6 +46,7 @@ describe("slash command shortcuts", () => {
     assert.equal(byName["/help"], "/help[/h]");
     assert.equal(byName["/health"], "/health[/hl]");
     assert.equal(byName["/ops"], "/ops[/o]");
+    assert.equal(byName["/files"], "/files[/f]");
     assert.equal(byName["/memory"], "/memory[/m]");
     assert.equal(byName["/skills"], "/skills[/ss]");
     assert.equal(byName["/skill"], "/skill[/sk]");
@@ -77,5 +82,16 @@ describe("slash command shortcuts", () => {
       name: "foo",
       prompt: "",
     });
+  });
+
+  it("accepts /files aliases and optional start path", () => {
+    assert.equal(isFilesCommand("/files"), true);
+    assert.equal(isFilesCommand("/f"), true);
+    assert.equal(isFilesCommand("/browse"), true);
+    assert.equal(isFilesCommand("/files ~/WORKS"), true);
+    assert.equal(isFilesCommand("/f C:\\Users"), true);
+    assert.deepEqual(parseFilesCommand("/files"), {});
+    assert.deepEqual(parseFilesCommand("/f ~/src"), { startPath: "~/src" });
+    assert.deepEqual(parseFilesCommand("/browse /tmp"), { startPath: "/tmp" });
   });
 });
