@@ -7,6 +7,25 @@ import type { AgentRecord } from "./registry-store.js";
 const BEGIN = "<!-- FLEET:BEGIN -->";
 const END = "<!-- FLEET:END -->";
 
+/** Agent IDs from the markdown table between FLEET markers (first column). */
+export function parseFleetAgentIds(markdown: string): string[] {
+  const beginIdx = markdown.indexOf(BEGIN);
+  const endIdx = markdown.indexOf(END);
+  if (beginIdx === -1 || endIdx === -1 || endIdx <= beginIdx) {
+    return [];
+  }
+  const block = markdown.slice(beginIdx + BEGIN.length, endIdx);
+  const ids: string[] = [];
+  for (const line of block.split("\n")) {
+    const m = line.match(/^\|\s*([A-Za-z0-9][\w.-]*)\s*\|/);
+    if (!m) continue;
+    const id = m[1]!;
+    if (id === "Agent" || id.startsWith("-") || id === "*(none)*") continue;
+    ids.push(id);
+  }
+  return [...new Set(ids)];
+}
+
 export function renderFleetTable(agents: AgentRecord[]): string {
   const rows = agents.length
     ? agents.map((a) => {

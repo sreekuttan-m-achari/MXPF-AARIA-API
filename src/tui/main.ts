@@ -16,16 +16,24 @@ import {
   isVoiceCommand,
   looksLikeCommand,
   matchCommands,
+  matchFilesRemotePath,
+  inlineSuggestion,
   parseFilesCommand,
   parseSkillCommand,
+  pickSuggestion,
   resolveCommand,
+  setFilesAgentIds,
   SLASH_COMMANDS,
 } from "./commands.js";
+import { completeRemotePath } from "./files/remote.js";
 import { TurnActivity } from "./activity.js";
 import { apiBase } from "./config.js";
+import { parseFleetAgentIds } from "../fleet/fleet-md.js";
+import { agentCwd, loadFleetMarkdown } from "../persona.js";
 import { BootLoader } from "./loader.js";
 import { createPasteAwareInput, flushStdin } from "./paste-input.js";
 import { runFileBrowser } from "./files/index.js";
+import { fetchFleet } from "./ops/api.js";
 import { clearChatHistory, opsEnabled, pushChatHistory, runOpsMode } from "./ops/index.js";
 import {
   agentPrefix,
@@ -36,7 +44,7 @@ import {
   learnTargetStyle,
   userPrefix,
 } from "./theme.js";
-import { colorizeCommandLine, colorizeReplyChunk, fitCommandHint } from "./render.js";
+import { colorizeCommandLine, colorizeReplyChunk } from "./render.js";
 
 function commandHelpLines(): string {
   return SLASH_COMMANDS.map((cmd) =>
@@ -51,10 +59,10 @@ ${formalTitleLine()}
 ${c.gold}${c.bold}Commands${c.reset}
 ${commandHelpLines()}
 
-${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for command suggestions · Tab to complete.
+${c.dim}Type ${c.cmd}/${c.reset}${c.dim} for commands · dim ghost + ${c.cmd}Tab${c.reset}${c.dim} to accept.
 Paste multiple lines as one message · end a line with \\ to continue on the next.
 ${c.cmd}/ops${c.reset}${c.dim} or ${c.cmd}Ctrl+O${c.reset}${c.dim} opens the ops overlay (Health · Jobs · Memory · Chat · Cursor · Fleet) — set ${c.cmd}AARIA_OPS=0${c.reset}${c.dim} to disable.
-${c.cmd}/files${c.reset}${c.dim} or ${c.cmd}Ctrl+F${c.reset}${c.dim} — local browser (${c.cmd}e${c.reset}${c.dim} = editor). ${c.cmd}/files remote${c.reset}${c.dim} or ${c.cmd}/files @agent${c.reset}${c.dim} — ASTRA remote.
+${c.cmd}/files${c.reset}${c.dim} or ${c.cmd}Ctrl+F${c.reset}${c.dim} — local browser (${c.cmd}e${c.reset}${c.dim} = editor). ${c.cmd}/files remote${c.reset}${c.dim} or ${c.cmd}/files @agent${c.reset}${c.dim} — ASTRA remote (${c.cmd}Tab${c.reset}${c.dim} accepts path / @minion ghost).
 Talk naturally for work tasks — code, DevOps, servers, planning.
 ${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 
@@ -100,9 +108,14 @@ async function main(): Promise<void> {
   }
 
   loader.setPhase("priming voice");
-  const voiceWarm = await warmVoiceEngine();
-  if (voiceWarm.ok && voiceWarm.ms && voiceWarm.ms > 0) {
+  const voiceWarm =
+    health.voice?.enabled === false
+      ? { ok: true as const, skipped: true }
+      : await warmVoiceEngine();
+  if (voiceWarm.ok && "ms" in voiceWarm && voiceWarm.ms && voiceWarm.ms > 0) {
     loader.setPhase(`voice ready (${voiceWarm.ms}ms)`);
+  } else if (health.voice?.enabled === false) {
+    loader.setPhase("voice off");
   }
 
   const client = new AriaWsClient();
@@ -227,11 +240,30 @@ async function main(): Promise<void> {
       })
     : input;
 
+  // readline/promises invokes completers with one arg (sync return or Promise).
+  // Always return a single preferred match so Tab accepts the inline ghost.
+  const filesCompleter = (
+    line: string,
+  ): [string[], string] | Promise<[string[], string]> => {
+    const remotePath = matchFilesRemotePath(line);
+    if (remotePath) {
+      return completeRemotePath(remotePath.agentId, remotePath.pathPrefix)
+        .then((hits): [string[], string] => {
+          const pick = pickSuggestion(hits, remotePath.pathPrefix);
+          return pick
+            ? [[pick.completion], remotePath.pathPrefix]
+            : [[], remotePath.pathPrefix];
+        })
+        .catch((): [string[], string] => [[], remotePath.pathPrefix]);
+    }
+    return completeLine(line);
+  };
+
   const rl = readline.createInterface({
     input: readlineInput,
     output,
     terminal: true,
-    completer: completeLine,
+    completer: filesCompleter,
   });
   let closed = false;
   let currentChatId: string | undefined;
@@ -240,9 +272,8 @@ async function main(): Promise<void> {
   let draftMessage: string | null = null;
   let continuation = "";
 
-  let hintVisible = false;
-  /** How many rows below the prompt the last hint occupied (for full clear). */
-  let hintLineCount = 0;
+  /** Dim suffix currently painted after the cursor (inline ghost autocomplete). */
+  let ghostSuffix = "";
   let opsOpen = false;
   let filesOpen = false;
 
@@ -384,8 +415,12 @@ async function main(): Promise<void> {
       const block = selected.join("\n");
       draftMessage = draftMessage ? `${draftMessage.trimEnd()}\n${block}` : block;
       const n = selected.length;
+      output.write(`\n${c.dim}selected ${n} path${n === 1 ? "" : "s"}:${c.reset}\n`);
+      for (const p of selected) {
+        output.write(`  ${c.teal}${p}${c.reset}\n`);
+      }
       output.write(
-        `\n${c.dim}(${n} path${n === 1 ? "" : "s"} — Enter to send · type a note then Enter · Esc to clear)${c.reset}\n`,
+        `${c.dim}(Enter to send · type a note then Enter · Esc to clear)${c.reset}\n`,
       );
     } else {
       output.write(`\n ${ariaWordmark()} ${c.dim}file browser cancelled${c.reset}\n\n`);
@@ -461,23 +496,15 @@ async function main(): Promise<void> {
     rl.close();
   };
 
-  // Render a dim suggestion line just below the prompt while typing a command.
-  // Uses DEC save/restore cursor so the input line is never disturbed.
-  // Hint text is kept to one row — wrapped hints cannot be erased cleanly on backspace.
+  // Inline ghost autocomplete: dim suffix after the typed text; Tab accepts it
+  // via the completer (single preferred match). Clear before each key so the
+  // ghost never collides with readline's echo.
   const clearHint = (): void => {
-    if (!hintVisible && hintLineCount === 0) {
+    if (!ghostSuffix) {
       return;
     }
-    const rows = Math.max(hintLineCount, hintVisible ? 1 : 0);
-    if (rows > 0) {
-      output.write("\x1b7");
-      for (let i = 0; i < rows; i++) {
-        output.write("\n\x1b[2K");
-      }
-      output.write("\x1b8");
-    }
-    hintVisible = false;
-    hintLineCount = 0;
+    output.write("\x1b[K");
+    ghostSuffix = "";
   };
 
   /**
@@ -501,31 +528,79 @@ async function main(): Promise<void> {
     quit();
   };
 
+  const paintInlineGhost = (suffix: string): void => {
+    const iface = rl as readline.Interface & { line: string; cursor: number };
+    if (iface.cursor !== iface.line.length) {
+      clearHint();
+      return;
+    }
+    if (!suffix) {
+      clearHint();
+      return;
+    }
+    // Erase any previous ghost, paint dim suffix, park cursor back at end of input.
+    output.write(`\x1b[K${c.dim}${suffix}${c.reset}`);
+    const cols = [...suffix].length;
+    if (cols > 0) {
+      output.write(`\x1b[${cols}D`);
+    }
+    ghostSuffix = suffix;
+  };
+
   const renderHint = (): void => {
-    if (!interactive || streaming) {
+    if (!interactive || streaming || opsOpen || filesOpen) {
       return;
     }
     const line = rl.line ?? "";
-    if (!line.startsWith("/") || line.includes(" ")) {
+    const iface = rl as readline.Interface & { cursor: number };
+    if (iface.cursor !== line.length) {
       clearHint();
       return;
     }
-    const matches = matchCommands(line);
-    if (matches.length === 0) {
-      clearHint();
+
+    const remotePath = matchFilesRemotePath(line);
+    if (remotePath) {
+      const requestLine = line;
+      void completeRemotePath(remotePath.agentId, remotePath.pathPrefix)
+        .then((hits) => {
+          if (rl.line !== requestLine) {
+            return;
+          }
+          const pick = pickSuggestion(hits, remotePath.pathPrefix);
+          paintInlineGhost(pick?.suffix ?? "");
+        })
+        .catch(() => {
+          if (rl.line === requestLine) {
+            clearHint();
+          }
+        });
       return;
     }
-    // Erase any previous hint rows before painting (avoids ghost wrap lines).
-    clearHint();
-    const raw =
-      matches.length === 1
-        ? `${c.cmd}${commandLabel(matches[0]!)}${c.reset} ${c.dim}— ${matches[0]!.summary}${c.reset}`
-        : matches.map((cmd) => `${c.cmd}${commandLabel(cmd)}${c.reset}`).join("  ");
-    const cols = output.columns && output.columns > 0 ? output.columns : 80;
-    const text = fitCommandHint(raw, cols);
-    output.write(`\x1b7\n\x1b[2K${c.dim}${text}${c.reset}\x1b8`);
-    hintVisible = true;
-    hintLineCount = 1;
+
+    const pick = inlineSuggestion(line);
+    paintInlineGhost(pick?.suffix ?? "");
+  };
+
+  const loadFilesAgentCompletions = (): void => {
+    const md = loadFleetMarkdown(agentCwd());
+    if (md) {
+      const ids = parseFleetAgentIds(md);
+      if (ids.length > 0) {
+        setFilesAgentIds(ids);
+      }
+    }
+    void fetchFleet()
+      .then((snap) => {
+        const ids = snap.agents
+          .filter((a) => a.status === "approved")
+          .map((a) => a.agentId);
+        if (ids.length > 0) {
+          setFilesAgentIds(ids);
+        }
+      })
+      .catch(() => {
+        /* keep FLEET.md list */
+      });
   };
 
   if (interactive) {
@@ -562,8 +637,10 @@ async function main(): Promise<void> {
         prompt();
         return;
       }
+      // Clear ghost before readline echoes the key — otherwise typed chars
+      // land inside the dim suffix and scramble the line.
+      clearHint();
       if (key && (key.name === "return" || key.name === "enter")) {
-        clearHint();
         return;
       }
       setImmediate(renderHint);
@@ -1140,6 +1217,7 @@ async function main(): Promise<void> {
   });
 
   printHelp();
+  loadFilesAgentCompletions();
   bootUiReady = true;
   if (pendingGreeting) {
     presentGreeting(pendingGreeting);

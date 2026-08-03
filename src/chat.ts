@@ -14,11 +14,11 @@ import {
 } from "./spoken.js";
 import { waitForWarmup } from "./warmup.js";
 import { isRecoverableRunError, runChatTurn } from "./stream.js";
-import { enqueueSpeech, stopSpeech } from "./tts.js";
+import { enqueueSpeech, isVoiceEnabled, stopSpeech } from "./tts.js";
 
 export type ChatTurnOptions = {
   learn?: boolean;
-  /** Override voice; default on for interactive chats, off for job/brief. */
+  /** Override voice; default follows global mute (off unless AARIA_VOICE=1 / /voice on). */
   voice?: boolean;
 };
 
@@ -29,7 +29,8 @@ function voiceEnabledForTurn(
   options?: ChatTurnOptions,
 ): boolean {
   if (options?.voice !== undefined) return options.voice;
-  return !SILENT_TRANSPORTS.has(transport);
+  if (SILENT_TRANSPORTS.has(transport)) return false;
+  return isVoiceEnabled();
 }
 
 export async function handleChatTurn(

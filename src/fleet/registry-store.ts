@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
@@ -45,15 +45,97 @@ const StoreSchema = z.object({
   agents: z.record(z.string(), AgentRecordSchema).default({}),
 });
 
+type Store = z.infer<typeof StoreSchema>;
+
 function storePath(cwd: string = agentCwd()): string {
   return path.join(cwd, "data", "fleet", "agents.json");
 }
 
-async function readStore(cwd?: string): Promise<z.infer<typeof StoreSchema>> {
+/**
+ * Parse store JSON, tolerating trailing garbage from interrupted concurrent writes.
+ * (JSON.parse throws "Unexpected non-whitespace character after JSON…".)
+ */
+export function parseStoreJson(raw: string): {
+  value: unknown;
+  repaired: boolean;
+} {
+  try {
+    return { value: JSON.parse(raw), repaired: false };
+  } catch (firstErr) {
+    const start = raw.indexOf("{");
+    if (start < 0) {
+      throw firstErr;
+    }
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = start; i < raw.length; i++) {
+      const ch = raw[i]!;
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escape = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{") {
+        depth += 1;
+      } else if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          return {
+            value: JSON.parse(raw.slice(start, i + 1)),
+            repaired: true,
+          };
+        }
+      }
+    }
+    throw firstErr;
+  }
+}
+
+/** Serialize in-process so read-modify-write cycles do not interleave. */
+let storeChain: Promise<unknown> = Promise.resolve();
+
+function withStoreLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = storeChain.then(fn, fn);
+  storeChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+async function writeStoreUnlocked(store: Store, cwd?: string): Promise<void> {
+  const file = storePath(cwd);
+  await mkdir(path.dirname(file), { recursive: true });
+  const payload = `${JSON.stringify(store, null, 2)}\n`;
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, payload, "utf8");
+  await rename(tmp, file);
+}
+
+async function readStore(cwd?: string): Promise<Store> {
   const file = storePath(cwd);
   try {
     const raw = await readFile(file, "utf8");
-    return StoreSchema.parse(JSON.parse(raw));
+    const { value, repaired } = parseStoreJson(raw);
+    const parsed = StoreSchema.parse(value);
+    if (repaired) {
+      await writeStoreUnlocked(parsed, cwd);
+    }
+    return parsed;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return { agents: {} };
@@ -62,26 +144,25 @@ async function readStore(cwd?: string): Promise<z.infer<typeof StoreSchema>> {
   }
 }
 
-async function writeStore(
-  store: z.infer<typeof StoreSchema>,
-  cwd?: string,
-): Promise<void> {
-  const file = storePath(cwd);
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+async function writeStore(store: Store, cwd?: string): Promise<void> {
+  await writeStoreUnlocked(store, cwd);
 }
 
 export async function listAgents(cwd?: string): Promise<AgentRecord[]> {
-  const store = await readStore(cwd);
-  return Object.values(store.agents);
+  return withStoreLock(async () => {
+    const store = await readStore(cwd);
+    return Object.values(store.agents);
+  });
 }
 
 export async function getAgent(
   agentId: string,
   cwd?: string,
 ): Promise<AgentRecord | undefined> {
-  const store = await readStore(cwd);
-  return store.agents[agentId];
+  return withStoreLock(async () => {
+    const store = await readStore(cwd);
+    return store.agents[agentId];
+  });
 }
 
 export async function upsertPending(
@@ -95,26 +176,28 @@ export async function upsertPending(
   },
   cwd?: string,
 ): Promise<AgentRecord> {
-  const store = await readStore(cwd);
-  const existing = store.agents[input.agentId];
-  const record: AgentRecord = {
-    agentId: input.agentId,
-    name: input.name ?? existing?.name,
-    hostname: input.hostname ?? existing?.hostname,
-    labels: input.labels ?? existing?.labels ?? {},
-    caps: input.caps ?? existing?.caps ?? [],
-    status: existing?.status === "approved" ? "approved" : "pending",
-    lastAnnounceAt: new Date().toISOString(),
-    lastSeenAt: new Date().toISOString(),
-    approvedAt: existing?.approvedAt,
-    lastStatus: existing?.lastStatus,
-    lastResult: existing?.lastResult,
-    currentJob: existing?.currentJob ?? null,
-    host: input.host ?? existing?.host,
-  };
-  store.agents[input.agentId] = AgentRecordSchema.parse(record);
-  await writeStore(store, cwd);
-  return store.agents[input.agentId]!;
+  return withStoreLock(async () => {
+    const store = await readStore(cwd);
+    const existing = store.agents[input.agentId];
+    const record: AgentRecord = {
+      agentId: input.agentId,
+      name: input.name ?? existing?.name,
+      hostname: input.hostname ?? existing?.hostname,
+      labels: input.labels ?? existing?.labels ?? {},
+      caps: input.caps ?? existing?.caps ?? [],
+      status: existing?.status === "approved" ? "approved" : "pending",
+      lastAnnounceAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      approvedAt: existing?.approvedAt,
+      lastStatus: existing?.lastStatus,
+      lastResult: existing?.lastResult,
+      currentJob: existing?.currentJob ?? null,
+      host: input.host ?? existing?.host,
+    };
+    store.agents[input.agentId] = AgentRecordSchema.parse(record);
+    await writeStore(store, cwd);
+    return store.agents[input.agentId]!;
+  });
 }
 
 export async function approveAgent(
@@ -123,24 +206,26 @@ export async function approveAgent(
   caps?: string[],
   cwd?: string,
 ): Promise<AgentRecord> {
-  const store = await readStore(cwd);
-  const existing = store.agents[agentId] ?? {
-    agentId,
-    labels: {},
-    caps: [],
-    status: "pending" as const,
-  };
-  const record: AgentRecord = {
-    ...existing,
-    agentId,
-    labels: labels ?? existing.labels,
-    caps: caps ?? existing.caps,
-    status: "approved",
-    approvedAt: new Date().toISOString(),
-  };
-  store.agents[agentId] = AgentRecordSchema.parse(record);
-  await writeStore(store, cwd);
-  return store.agents[agentId]!;
+  return withStoreLock(async () => {
+    const store = await readStore(cwd);
+    const existing = store.agents[agentId] ?? {
+      agentId,
+      labels: {},
+      caps: [],
+      status: "pending" as const,
+    };
+    const record: AgentRecord = {
+      ...existing,
+      agentId,
+      labels: labels ?? existing.labels,
+      caps: caps ?? existing.caps,
+      status: "approved",
+      approvedAt: new Date().toISOString(),
+    };
+    store.agents[agentId] = AgentRecordSchema.parse(record);
+    await writeStore(store, cwd);
+    return store.agents[agentId]!;
+  });
 }
 
 export async function recordAgentStatus(
@@ -148,13 +233,15 @@ export async function recordAgentStatus(
   status: Record<string, unknown>,
   cwd?: string,
 ): Promise<void> {
-  const store = await readStore(cwd);
-  const existing = store.agents[agentId];
-  if (!existing) return;
-  existing.lastStatus = status;
-  existing.lastSeenAt = new Date().toISOString();
-  store.agents[agentId] = existing;
-  await writeStore(store, cwd);
+  await withStoreLock(async () => {
+    const store = await readStore(cwd);
+    const existing = store.agents[agentId];
+    if (!existing) return;
+    existing.lastStatus = status;
+    existing.lastSeenAt = new Date().toISOString();
+    store.agents[agentId] = existing;
+    await writeStore(store, cwd);
+  });
 }
 
 export async function recordAgentResult(
@@ -162,54 +249,52 @@ export async function recordAgentResult(
   result: Record<string, unknown>,
   cwd?: string,
 ): Promise<void> {
-  const store = await readStore(cwd);
-  const existing = store.agents[agentId];
-  if (!existing) return;
-  existing.lastResult = result;
-  existing.lastSeenAt = new Date().toISOString();
-  const jobId = typeof result.jobId === "string" ? result.jobId : undefined;
-  if (
-    existing.currentJob &&
-    (!jobId || existing.currentJob.jobId === jobId)
-  ) {
-    existing.currentJob = null;
-  }
+  await withStoreLock(async () => {
+    const store = await readStore(cwd);
+    const existing = store.agents[agentId];
+    if (!existing) return;
+    existing.lastResult = result;
+    existing.lastSeenAt = new Date().toISOString();
+    const jobId = typeof result.jobId === "string" ? result.jobId : undefined;
+    if (
+      existing.currentJob &&
+      (!jobId || existing.currentJob.jobId === jobId)
+    ) {
+      existing.currentJob = null;
+    }
 
-  // Persist full HOST.md when host.profile returns markdown
-  if (
-    result.action === "host.profile" ||
-    result.action === "host"
-  ) {
-    const data = result.data;
-    if (data && typeof data === "object") {
-      const d = data as Record<string, unknown>;
-      const markdown =
-        typeof d.markdown === "string" ? d.markdown : undefined;
-      if (markdown && existing.host) {
-        const { writeHostMirror } = await import("./host-profile.js");
-        const purpose =
-          typeof d.purpose === "string" ? d.purpose : existing.host.purpose;
-        const nextHost = {
-          ...existing.host,
-          purpose,
-          os: typeof d.os === "string" ? d.os : existing.host.os,
-          arch: typeof d.arch === "string" ? d.arch : existing.host.arch,
-          summary: markdown.slice(0, 4 * 1024),
-          updatedAt:
-            typeof d.updatedAt === "string"
-              ? d.updatedAt
-              : new Date().toISOString(),
-          hash:
-            typeof d.hash === "string" ? d.hash : existing.host.hash,
-        };
-        existing.host = nextHost;
-        await writeHostMirror(agentId, nextHost, markdown, cwd);
+    // Persist full HOST.md when host.profile returns markdown
+    if (result.action === "host.profile" || result.action === "host") {
+      const data = result.data;
+      if (data && typeof data === "object") {
+        const d = data as Record<string, unknown>;
+        const markdown =
+          typeof d.markdown === "string" ? d.markdown : undefined;
+        if (markdown && existing.host) {
+          const { writeHostMirror } = await import("./host-profile.js");
+          const purpose =
+            typeof d.purpose === "string" ? d.purpose : existing.host.purpose;
+          const nextHost = {
+            ...existing.host,
+            purpose,
+            os: typeof d.os === "string" ? d.os : existing.host.os,
+            arch: typeof d.arch === "string" ? d.arch : existing.host.arch,
+            summary: markdown.slice(0, 4 * 1024),
+            updatedAt:
+              typeof d.updatedAt === "string"
+                ? d.updatedAt
+                : new Date().toISOString(),
+            hash: typeof d.hash === "string" ? d.hash : existing.host.hash,
+          };
+          existing.host = nextHost;
+          await writeHostMirror(agentId, nextHost, markdown, cwd);
+        }
       }
     }
-  }
 
-  store.agents[agentId] = existing;
-  await writeStore(store, cwd);
+    store.agents[agentId] = existing;
+    await writeStore(store, cwd);
+  });
 }
 
 export async function setCurrentJob(
@@ -221,15 +306,17 @@ export async function setCurrentJob(
   },
   cwd?: string,
 ): Promise<void> {
-  const store = await readStore(cwd);
-  const existing = store.agents[agentId];
-  if (!existing) return;
-  existing.currentJob = {
-    jobId: job.jobId,
-    action: job.action,
-    summary: job.summary,
-    dispatchedAt: new Date().toISOString(),
-  };
-  store.agents[agentId] = existing;
-  await writeStore(store, cwd);
+  await withStoreLock(async () => {
+    const store = await readStore(cwd);
+    const existing = store.agents[agentId];
+    if (!existing) return;
+    existing.currentJob = {
+      jobId: job.jobId,
+      action: job.action,
+      summary: job.summary,
+      dispatchedAt: new Date().toISOString(),
+    };
+    store.agents[agentId] = existing;
+    await writeStore(store, cwd);
+  });
 }

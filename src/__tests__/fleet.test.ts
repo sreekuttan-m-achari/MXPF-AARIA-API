@@ -6,7 +6,11 @@ import { test } from "node:test";
 
 import { loadFleetMqttConfig } from "../fleet/config.js";
 import { parseEnvelope, serializeEnvelope } from "../fleet/envelope.js";
-import { renderFleetTable, syncFleetMarkdown } from "../fleet/fleet-md.js";
+import {
+  parseFleetAgentIds,
+  renderFleetTable,
+  syncFleetMarkdown,
+} from "../fleet/fleet-md.js";
 import {
   approveAgent,
   listAgents,
@@ -24,6 +28,23 @@ test("fleet envelope round-trip", () => {
     payload: { action: "health", args: {} },
   };
   assert.deepEqual(parseEnvelope(serializeEnvelope(env)), env);
+});
+
+test("parseFleetAgentIds reads table rows", () => {
+  const md = `# ASTRA Fleet
+
+<!-- FLEET:BEGIN -->
+| Agent ID | Name | Host / site | Purpose | Labels | Caps | Status |
+|----------|------|-------------|---------|--------|------|--------|
+| astra-demo | demo | pop-os |  | env=lab | health, exec | approved |
+| astra-vmi548194 | astra-ironssvm | vmi548194.contaboserver.net | Web server | env=prod | health, exec | approved |
+<!-- FLEET:END -->
+`;
+  assert.deepEqual(parseFleetAgentIds(md), [
+    "astra-demo",
+    "astra-vmi548194",
+  ]);
+  assert.deepEqual(parseFleetAgentIds("no markers"), []);
 });
 
 test("fleet topics", () => {
@@ -59,6 +80,28 @@ test("fleet hub view strips host and tracks defaults", async () => {
   assert.equal(hub.host, "d5.example.hivemq.cloud:8883");
   assert.equal(hub.messagesIn, 0);
   assert.ok(hub.subscriptions.includes("mxpf/v1/agents/+/status"));
+});
+
+test("parseStoreJson recovers trailing garbage", async () => {
+  const { parseStoreJson } = await import("../fleet/registry-store.js");
+  const good = {
+    agents: {
+      "astra-demo": {
+        agentId: "astra-demo",
+        labels: {},
+        caps: ["health"],
+        status: "approved",
+      },
+    },
+  };
+  const raw = `${JSON.stringify(good, null, 2)}\nTRAILING JUNK\n`;
+  const { value, repaired } = parseStoreJson(raw);
+  assert.equal(repaired, true);
+  assert.deepEqual(value, good);
+  assert.deepEqual(parseStoreJson(JSON.stringify(good)), {
+    value: good,
+    repaired: false,
+  });
 });
 
 test("registry approve + fleet markdown", async () => {

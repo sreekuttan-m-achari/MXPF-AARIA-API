@@ -1,3 +1,5 @@
+import { completeLocalPath } from "./files/fs.js";
+
 export type SlashCommand = {
   name: string;
   aliases?: string[];
@@ -94,9 +96,201 @@ export function matchCommands(token: string): SlashCommand[] {
   return prefixMatches;
 }
 
-/** readline completer: completes slash commands, passes everything else through. */
-export function completeLine(line: string): [string[], string] {
+/** Agent IDs for `/files @…` Tab completion (from FLEET.md / live fleet). */
+let filesAgentIds: string[] = [];
+
+export function setFilesAgentIds(ids: string[]): void {
+  filesAgentIds = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].sort(
+    (a, b) => a.localeCompare(b),
+  );
+}
+
+export function listFilesAgentIds(): string[] {
+  return filesAgentIds;
+}
+
+function filterAgentIds(prefix: string): string[] {
+  const ids = listFilesAgentIds();
+  if (ids.length === 0) {
+    return [];
+  }
+  if (!prefix) {
+    return ids;
+  }
+  const lower = prefix.toLowerCase();
+  return ids.filter((id) => id.toLowerCase().startsWith(lower));
+}
+
+/**
+ * When the line is `/files @partial` (or /f|/browse), return matching agent IDs.
+ * Empty prefix → all known IDs. Returns null when not in @-complete context.
+ */
+export function matchFilesAtAgents(line: string): string[] | null {
+  const m = line.match(/^\/(?:files|f|browse)\s+@(\S*)$/i);
+  if (!m) {
+    return null;
+  }
+  return filterAgentIds(m[1]!);
+}
+
+/**
+ * When the line is `/files remote <partial>` (no path yet), return matching agent IDs.
+ * Returns null when not in that context.
+ */
+export function matchFilesRemoteAgents(line: string): string[] | null {
+  const m = line.match(/^\/(?:files|f|browse)\s+remote\s+(\S*)$/i);
+  if (!m) {
+    return null;
+  }
+  const prefix = m[1]!;
+  if (prefix.startsWith("/") || prefix.startsWith("~")) {
+    return null;
+  }
+  return filterAgentIds(prefix);
+}
+
+/** Local `/files <path>` token — null when remote/@ or bare command. */
+export function matchFilesLocalPath(line: string): string | null {
+  const m = line.match(/^\/(?:files|f|browse)\s+(.*)$/i);
+  if (!m) {
+    return null;
+  }
+  const rest = m[1]!;
+  if (rest.startsWith("@")) {
+    return null;
+  }
+  if (/^remote(?:\s|$)/i.test(rest)) {
+    return null;
+  }
+  return rest;
+}
+
+/** Remote path after `@agent` or `remote <agent>` — null when not applicable. */
+export function matchFilesRemotePath(
+  line: string,
+): { agentId: string; pathPrefix: string } | null {
+  const at = line.match(/^\/(?:files|f|browse)\s+@(\S+)\s+(.*)$/i);
+  if (at) {
+    return { agentId: at[1]!, pathPrefix: at[2]! };
+  }
+  const rem = line.match(/^\/(?:files|f|browse)\s+remote\s+(\S+)\s+(.*)$/i);
+  if (rem) {
+    const agentId = rem[1]!;
+    if (agentId.startsWith("/") || agentId.startsWith("~")) {
+      return null;
+    }
+    return { agentId, pathPrefix: rem[2]! };
+  }
+  return null;
+}
+
+/** Basename-ish labels for compact displays (tests / debug). */
+export function pathCompletionHints(completions: string[], limit = 8): string[] {
+  return completions.slice(0, limit).map((hit) => {
+    const trimmed = hit.replace(/[/\\]+$/, "");
+    const sep = hit.includes("\\") && !hit.includes("/") ? "\\" : "/";
+    const idx = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+    const base = idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+    return hit.endsWith("/") || hit.endsWith("\\") ? `${base}${sep}` : base;
+  });
+}
+
+export type InlineSuggestion = {
+  /** Full replacement for `token`. */
+  completion: string;
+  /** Substring at the end of the line being completed. */
+  token: string;
+  /** Dim ghost text painted after the cursor (completion beyond token). */
+  suffix: string;
+};
+
+function suggestionSuffix(token: string, completion: string): string | null {
+  if (completion.startsWith(token)) {
+    const suffix = completion.slice(token.length);
+    return suffix.length > 0 ? suffix : null;
+  }
+  // Slash commands are typed case-insensitively; keep completion casing in the suffix.
+  if (
+    token.startsWith("/") &&
+    completion.toLowerCase().startsWith(token.toLowerCase())
+  ) {
+    const suffix = completion.slice(token.length);
+    return suffix.length > 0 ? suffix : null;
+  }
+  return null;
+}
+
+/** Pick the top hit for inline ghost + Tab accept. */
+export function pickSuggestion(
+  hits: string[],
+  token: string,
+): InlineSuggestion | null {
+  if (hits.length === 0) {
+    return null;
+  }
+  const completion = hits[0]!;
+  const suffix = suggestionSuffix(token, completion);
+  if (!suffix) {
+    return null;
+  }
+  return { completion, token, suffix };
+}
+
+/**
+ * All completion candidates for a line (may be many).
+ * Prefer `completeLine` / `inlineSuggestion` for Tab + ghost UX.
+ */
+export function listCompletions(line: string): [string[], string] {
+  const atToken = line.match(/^\/(?:files|f|browse)\s+(@\S*)$/i);
+  if (atToken) {
+    const token = atToken[1]!;
+    const hits = matchFilesAtAgents(line) ?? [];
+    if (hits.length === 0) {
+      return [[], token];
+    }
+    return [hits.map((id) => `@${id}`), token];
+  }
+
+  const remoteAgents = matchFilesRemoteAgents(line);
+  if (remoteAgents !== null) {
+    const token = line.match(/\s+(\S*)$/)?.[1] ?? "";
+    if (remoteAgents.length === 0) {
+      return [[], token];
+    }
+    return [remoteAgents, token];
+  }
+
+  // Remote path completion is async (fleet fs.list) — handled in main.ts.
+  const remotePath = matchFilesRemotePath(line);
+  if (remotePath) {
+    return [[], remotePath.pathPrefix];
+  }
+
+  const localPath = matchFilesLocalPath(line);
+  if (localPath !== null) {
+    const hits: string[] = [];
+    // First token may still be a partial `remote` keyword.
+    if (
+      !localPath.includes(" ") &&
+      !localPath.startsWith("/") &&
+      !localPath.startsWith("~")
+    ) {
+      if (
+        "remote".startsWith(localPath.toLowerCase()) &&
+        localPath.toLowerCase() !== "remote"
+      ) {
+        hits.push("remote");
+      }
+    }
+    hits.push(...completeLocalPath(localPath));
+    return [hits, localPath];
+  }
+
   if (!line.startsWith("/")) {
+    return [[], line];
+  }
+  // Don't treat `/files …` etc. as slash-command completion.
+  if (/\s/.test(line)) {
     return [[], line];
   }
   const lower = line.toLowerCase();
@@ -105,8 +299,31 @@ export function completeLine(line: string): [string[], string] {
   if (exact.length > 0) {
     return [exact, line];
   }
+  // Bare `/` → canonical names only (skip aliases) for a clean ghost.
+  if (lower === "/") {
+    return [SLASH_COMMANDS.map((cmd) => cmd.name), line];
+  }
   const hits = names.filter((name) => name.startsWith(lower));
-  return [hits.length > 0 ? hits : names, line];
+  return [hits, line];
+}
+
+/** Inline ghost suggestion for the current line (sync contexts only). */
+export function inlineSuggestion(line: string): InlineSuggestion | null {
+  const [hits, token] = listCompletions(line);
+  return pickSuggestion(hits, token);
+}
+
+/**
+ * readline completer: returns a single preferred match so Tab accepts the
+ * inline ghost without dumping a match list below the prompt.
+ */
+export function completeLine(line: string): [string[], string] {
+  const [hits, token] = listCompletions(line);
+  const pick = pickSuggestion(hits, token);
+  if (!pick) {
+    return [[], token];
+  }
+  return [[pick.completion], token];
 }
 
 /** True when the text looks like a bare slash-command token (no path, no spaces). */

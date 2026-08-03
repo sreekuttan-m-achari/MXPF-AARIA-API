@@ -1,3 +1,4 @@
+import { lstatSync, readdirSync, statSync } from "node:fs";
 import { lstat, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -114,4 +115,137 @@ export function displayPath(absolute: string): string {
     return `~${path.sep}${resolved.slice(prefix.length)}`;
   }
   return resolved;
+}
+
+/** Split a typed path prefix into directory + basename for Tab completion. */
+export function splitPathPrefix(partial: string): {
+  dir: string;
+  base: string;
+  sep: string;
+  /** User-facing directory prefix including trailing sep (empty when relative basename only). */
+  typedDir: string;
+} {
+  const sep = partial.includes("\\") && !partial.includes("/") ? "\\" : "/";
+  if (partial.endsWith("/") || partial.endsWith("\\")) {
+    const dir = partial.slice(0, -1);
+    return {
+      dir: dir === "" ? sep : dir,
+      base: "",
+      sep,
+      typedDir: partial,
+    };
+  }
+  const idx = Math.max(partial.lastIndexOf("/"), partial.lastIndexOf("\\"));
+  if (idx === -1) {
+    return { dir: ".", base: partial, sep, typedDir: "" };
+  }
+  const dir = partial.slice(0, idx);
+  return {
+    dir: dir === "" ? sep : dir,
+    base: partial.slice(idx + 1),
+    sep,
+    typedDir: partial.slice(0, idx + 1),
+  };
+}
+
+export type PathCompleteEntry = {
+  name: string;
+  isDirectory: boolean;
+};
+
+/**
+ * Build readline completion strings from directory entries, preserving the
+ * user-typed directory prefix (including leading `~`).
+ */
+export function formatPathCompletions(
+  typedDir: string,
+  base: string,
+  entries: PathCompleteEntry[],
+  sep = "/",
+  options?: { limit?: number; showHidden?: boolean },
+): string[] {
+  const limit = options?.limit ?? 80;
+  const showHidden = options?.showHidden ?? base.startsWith(".");
+  const lowerBase = base.toLowerCase();
+  const hits: string[] = [];
+  for (const entry of entries) {
+    if (!showHidden && entry.name.startsWith(".")) {
+      continue;
+    }
+    if (base && !entry.name.toLowerCase().startsWith(lowerBase)) {
+      continue;
+    }
+    hits.push(
+      `${typedDir}${entry.name}${entry.isDirectory ? sep : ""}`,
+    );
+    if (hits.length >= limit) {
+      break;
+    }
+  }
+  return hits;
+}
+
+/**
+ * Sync local filesystem path completions for `/files <path>` Tab.
+ * Preserves a leading `~` in the returned strings when the user typed one.
+ */
+export function completeLocalPath(
+  partial: string,
+  options?: { limit?: number },
+): string[] {
+  const trimmed = partial;
+  if (trimmed === "~") {
+    return ["~/"];
+  }
+
+  const { dir, base, sep, typedDir } = splitPathPrefix(trimmed);
+  let absDir: string;
+  try {
+    absDir = path.resolve(expandUserPath(dir === "." ? process.cwd() : dir));
+  } catch {
+    return [];
+  }
+
+  let names: string[];
+  try {
+    names = readdirSync(absDir);
+  } catch {
+    return [];
+  }
+
+  names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+
+  const entries: PathCompleteEntry[] = [];
+  for (const name of names) {
+    const absolutePath = path.join(absDir, name);
+    let isDirectory = false;
+    try {
+      const link = lstatSync(absolutePath);
+      if (link.isSymbolicLink()) {
+        try {
+          isDirectory = statSync(absolutePath).isDirectory();
+        } catch {
+          isDirectory = false;
+        }
+      } else {
+        isDirectory = link.isDirectory();
+      }
+    } catch {
+      continue;
+    }
+    entries.push({ name, isDirectory });
+  }
+
+  // Dirs first, then files (stable within each group via prior name sort).
+  entries.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) {
+      return a.isDirectory ? -1 : 1;
+    }
+    return 0;
+  });
+
+  return formatPathCompletions(typedDir, base, entries, sep, {
+    limit: options?.limit,
+    showHidden: base.startsWith("."),
+  });
 }

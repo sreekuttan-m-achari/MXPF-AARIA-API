@@ -334,7 +334,7 @@ All settings are environment variables (see `.env-sample`). Common ones:
 | `AARIA_HEARTBEAT_EVERY` | `5m` | Default heartbeat interval (`30s`, `5m`, `1h`, …) |
 | `AARIA_MORNING_BRIEF` | on | First WebSocket connect each day triggers a morning brief |
 | `AARIA_TIMEZONE` | — | Override `USER.md` timezone for daily brief (default `Asia/Kolkata`) |
-| `AARIA_VOICE` | on if backend found | Set `0` to disable local TTS |
+| `AARIA_VOICE` | off | Set `1` / `on` to enable local TTS; `0` / `off` to mute |
 | `AARIA_TTS` | `auto` | `auto` \| `piper` \| `spd-say` |
 | `AARIA_PIPER_MODEL` | auto-discover | Path to Piper `.onnx` voice |
 | `AARIA_PIPER_PERSISTENT` | `1` (on) | Keep Piper+model loaded after warmup; `0` = spawn per utterance |
@@ -345,7 +345,7 @@ All settings are environment variables (see `.env-sample`). Common ones:
 
 ### Voice reply (local TTS)
 
-The API speaks during interactive chat (TUI, plasmoid, HTTP/WS). Scheduler jobs and morning briefs stay silent. No extra Cursor tokens — text is cleaned/clipped with heuristics.
+Voice is **off by default**. Set `AARIA_VOICE=1` or use `/voice on` in the TUI. When enabled, the API speaks during interactive chat (TUI, plasmoid, HTTP/WS). Scheduler jobs and morning briefs stay silent. No extra Cursor tokens — text is cleaned/clipped with heuristics.
 
 **What you hear (per turn):**
 1. **Each new sentence** of AARIA’s reply as it streams (queued; does not cut off the previous line)  

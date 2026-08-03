@@ -41,12 +41,16 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
-async function postJson<T>(path: string, body?: unknown): Promise<T> {
+async function postJson<T>(
+  path: string,
+  body?: unknown,
+  timeoutMs = 15_000,
+): Promise<T> {
   const res = await fetch(`${apiBase()}${path}`, {
     method: "POST",
     headers: body != null ? { "Content-Type": "application/json" } : undefined,
     body: body != null ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const data = (await res.json()) as T & { error?: string };
   if (!res.ok || (data as { error?: string }).error) {
@@ -250,13 +254,19 @@ export async function fleetCmdWait(
   args?: Record<string, unknown>,
   timeoutMs = 15_000,
 ): Promise<FleetCmdWaitResult> {
-  return postJson<FleetCmdWaitResult>("/fleet/cmd", {
-    agentId,
-    action,
-    args,
-    wait: true,
-    timeoutMs,
-  });
+  // HTTP client must outlive the server-side wait.
+  const httpTimeout = Math.max(timeoutMs + 5_000, 20_000);
+  return postJson<FleetCmdWaitResult>(
+    "/fleet/cmd",
+    {
+      agentId,
+      action,
+      args,
+      wait: true,
+      timeoutMs,
+    },
+    httpTimeout,
+  );
 }
 
 export type FleetUpdateResult = {

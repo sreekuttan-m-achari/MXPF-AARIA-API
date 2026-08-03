@@ -7,9 +7,12 @@ import { describe, it } from "node:test";
 import {
   displayPath,
   expandUserPath,
+  completeLocalPath,
+  formatPathCompletions,
   listEntries,
   parentDir,
   resolveStartDir,
+  splitPathPrefix,
 } from "../tui/files/fs.js";
 import { homedir } from "node:os";
 
@@ -82,5 +85,35 @@ describe("file browser fs helpers", () => {
     assert.ok(found);
     assert.equal(found!.isSymlink, true);
     assert.equal(found!.isDirectory, false);
+  });
+
+  it("splitPathPrefix and formatPathCompletions preserve typed dirs", () => {
+    assert.deepEqual(splitPathPrefix("/var/ww"), {
+      dir: "/var",
+      base: "ww",
+      sep: "/",
+      typedDir: "/var/",
+    });
+    assert.deepEqual(splitPathPrefix("~/Wor"), {
+      dir: "~",
+      base: "Wor",
+      sep: "/",
+      typedDir: "~/",
+    });
+    assert.deepEqual(
+      formatPathCompletions("~/", "Wor", [
+        { name: "WORKS", isDirectory: true },
+        { name: "other", isDirectory: true },
+      ]),
+      ["~/WORKS/"],
+    );
+  });
+  it("completeLocalPath lists matching entries with trailing slash for dirs", async () => {
+    const base = await mkdtemp(path.join(tmpdir(), "aaria-files-"));
+    await mkdir(path.join(base, "docs"));
+    await writeFile(path.join(base, "data.txt"), "x");
+    const hits = completeLocalPath(path.join(base, "d"));
+    assert.ok(hits.some((h) => /docs[/\\]$/.test(h)));
+    assert.ok(hits.some((h) => h.endsWith("data.txt")));
   });
 });

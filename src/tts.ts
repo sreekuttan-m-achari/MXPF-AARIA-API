@@ -69,8 +69,8 @@ function voiceEnabledFromEnv(): boolean {
   if (raw === "1" || raw?.toLowerCase() === "true" || raw?.toLowerCase() === "on") {
     return true;
   }
-  // Default: on when a backend exists (decided at probe time)
-  return true;
+  // Default: off — opt in with AARIA_VOICE=1 or /voice on
+  return false;
 }
 
 /** Effective voice preference (runtime toggle wins over env). */

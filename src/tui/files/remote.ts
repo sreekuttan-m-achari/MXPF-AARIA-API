@@ -1,7 +1,12 @@
 import path from "node:path";
 
 import { fleetCmdWait, fetchFleet, type FleetAgent } from "../ops/api.js";
-import type { DirEntry } from "./fs.js";
+import {
+  formatPathCompletions,
+  splitPathPrefix,
+  type DirEntry,
+  type PathCompleteEntry,
+} from "./fs.js";
 
 export type RemoteListResult = {
   path: string;
@@ -53,6 +58,63 @@ export async function listRemoteEntries(
     throw new Error("fs.list returned no entries");
   }
   return data.entries;
+}
+
+const remoteListCache = new Map<
+  string,
+  { at: number; entries: PathCompleteEntry[] }
+>();
+const REMOTE_LIST_TTL_MS = 15_000;
+
+async function cachedRemoteEntries(
+  agentId: string,
+  dir: string,
+  showHidden: boolean,
+): Promise<PathCompleteEntry[]> {
+  const key = `${agentId}\0${dir}\0${showHidden ? 1 : 0}`;
+  const hit = remoteListCache.get(key);
+  if (hit && Date.now() - hit.at < REMOTE_LIST_TTL_MS) {
+    return hit.entries;
+  }
+  const listed = await listRemoteEntries(agentId, dir, { showHidden });
+  const entries: PathCompleteEntry[] = listed.map((e) => ({
+    name: e.name,
+    isDirectory: e.isDirectory,
+  }));
+  entries.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) {
+      return a.isDirectory ? -1 : 1;
+    }
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  });
+  remoteListCache.set(key, { at: Date.now(), entries });
+  return entries;
+}
+
+/**
+ * Tab-complete a remote path via ASTRA `fs.list`.
+ * Passes `~` through to the minion (does not expand to the desk home).
+ */
+export async function completeRemotePath(
+  agentId: string,
+  partial: string,
+  options?: { limit?: number },
+): Promise<string[]> {
+  const { dir, base, sep, typedDir } = splitPathPrefix(partial);
+  const listDir = dir === "." ? "/" : dir;
+  try {
+    const entries = await cachedRemoteEntries(
+      agentId,
+      listDir,
+      base.startsWith("."),
+    );
+    return formatPathCompletions(typedDir, base, entries, sep, {
+      limit: options?.limit,
+      showHidden: base.startsWith("."),
+    });
+  } catch {
+    return [];
+  }
 }
 
 export async function readRemoteFile(

@@ -1,20 +1,33 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
   commandLabel,
+  completeLine,
+  inlineSuggestion,
   isBareSkillCommand,
   isFilesCommand,
   isMemoryCommand,
   isSkillCommand,
   isSkillsCommand,
   isVoiceCommand,
+  listCompletions,
+  matchFilesAtAgents,
+  matchFilesLocalPath,
+  matchFilesRemoteAgents,
+  matchFilesRemotePath,
   parseFilesCommand,
   parseSkillCommand,
+  pickSuggestion,
   resolveCommand,
+  setFilesAgentIds,
   shortcutOf,
   SLASH_COMMANDS,
 } from "../tui/commands.js";
+import { completeLocalPath } from "../tui/files/fs.js";
 
 describe("slash command shortcuts", () => {
   it("maps each short alias to the canonical command", () => {
@@ -124,5 +137,111 @@ describe("slash command shortcuts", () => {
       agentId: "astra-demo",
       startPath: "~/x",
     });
+  });
+
+  it("Tab-completes /files @minion ids", () => {
+    setFilesAgentIds([
+      "astra-demo",
+      "astra-vmi548194",
+      "astra-winmagictoys-prod",
+    ]);
+    assert.deepEqual(matchFilesAtAgents("/files @"), [
+      "astra-demo",
+      "astra-vmi548194",
+      "astra-winmagictoys-prod",
+    ]);
+    assert.deepEqual(matchFilesAtAgents("/f @astra-v"), ["astra-vmi548194"]);
+    assert.deepEqual(matchFilesAtAgents("/browse @astra-win"), [
+      "astra-winmagictoys-prod",
+    ]);
+    assert.equal(matchFilesAtAgents("/files remote"), null);
+    assert.deepEqual(completeLine("/files @astra-v"), [
+      ["@astra-vmi548194"],
+      "@astra-v",
+    ]);
+    // Tab returns a single preferred match (inline ghost accept)
+    assert.deepEqual(completeLine("/f @"), [["@astra-demo"], "@"]);
+    assert.deepEqual(listCompletions("/f @")[0], [
+      "@astra-demo",
+      "@astra-vmi548194",
+      "@astra-winmagictoys-prod",
+    ]);
+  });
+
+  it("Tab-completes /files remote agent ids", () => {
+    setFilesAgentIds(["astra-demo", "astra-vmi548194"]);
+    assert.deepEqual(matchFilesRemoteAgents("/files remote "), [
+      "astra-demo",
+      "astra-vmi548194",
+    ]);
+    assert.deepEqual(matchFilesRemoteAgents("/files remote astra-v"), [
+      "astra-vmi548194",
+    ]);
+    assert.equal(matchFilesRemoteAgents("/files remote /var"), null);
+    assert.deepEqual(completeLine("/files remote astra-v"), [
+      ["astra-vmi548194"],
+      "astra-v",
+    ]);
+    // Bare `remote` (no trailing space) is not agent-complete yet
+    assert.deepEqual(completeLine("/files remote"), [[], "/files remote"]);
+  });
+
+  it("offers inline ghost suffixes for commands and paths", async () => {
+    assert.deepEqual(inlineSuggestion("/fil"), {
+      completion: "/files",
+      token: "/fil",
+      suffix: "es",
+    });
+    assert.deepEqual(pickSuggestion(["/files", "/fil"], "/fil"), {
+      completion: "/files",
+      token: "/fil",
+      suffix: "es",
+    });
+    assert.equal(inlineSuggestion("/files"), null);
+
+    setFilesAgentIds(["astra-demo", "astra-vmi548194"]);
+    assert.deepEqual(inlineSuggestion("/files @astra-v"), {
+      completion: "@astra-vmi548194",
+      token: "@astra-v",
+      suffix: "mi548194",
+    });
+
+    const base = await mkdtemp(path.join(tmpdir(), "aaria-files-complete-"));
+    await mkdir(path.join(base, "alpha-dir"));
+    await writeFile(path.join(base, "alpha-file.txt"), "x");
+    await writeFile(path.join(base, "beta.txt"), "y");
+
+    const prefix = path.join(base, "alpha");
+    const hits = completeLocalPath(prefix);
+    assert.ok(hits.some((h) => h.endsWith(`alpha-dir${path.sep}`) || h.endsWith("alpha-dir/")));
+    assert.ok(hits.some((h) => h.endsWith("alpha-file.txt")));
+    assert.ok(!hits.some((h) => h.includes("beta")));
+
+    assert.equal(matchFilesLocalPath(`/files ${prefix}`), prefix);
+    assert.equal(matchFilesLocalPath("/files remote /var"), null);
+    assert.equal(matchFilesLocalPath("/files @astra-demo /var"), null);
+
+    const [kwHits, kwToken] = completeLine("/files rem");
+    assert.equal(kwToken, "rem");
+    assert.deepEqual(kwHits, ["remote"]);
+    assert.deepEqual(inlineSuggestion("/files rem"), {
+      completion: "remote",
+      token: "rem",
+      suffix: "ote",
+    });
+
+    assert.deepEqual(matchFilesRemotePath("/files @astra-demo /var/ww"), {
+      agentId: "astra-demo",
+      pathPrefix: "/var/ww",
+    });
+    assert.deepEqual(
+      matchFilesRemotePath("/files remote astra-demo /var/ww"),
+      { agentId: "astra-demo", pathPrefix: "/var/ww" },
+    );
+    // Sync completer leaves remote paths for the async main wrapper
+    assert.deepEqual(completeLine("/files @astra-demo /var/ww"), [
+      [],
+      "/var/ww",
+    ]);
   });
 });
