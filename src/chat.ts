@@ -6,6 +6,7 @@ import {
   type ConversationTransport,
 } from "./debug.js";
 import { isChatCancelled } from "./errors.js";
+import { maybeAugmentCodingTurn } from "./kb/domainLanguage.js";
 import { scheduleLearnReview } from "./learn/review.js";
 import { expandWithSkill } from "./skills/index.js";
 import {
@@ -45,6 +46,8 @@ export async function handleChatTurn(
   await waitForWarmup();
   const started = Date.now();
   const expanded = expandWithSkill(message);
+  // Soft optional KB: coding-/repo-adjacent only; no-op when unset (no fetch).
+  const prompt = await maybeAugmentCodingTurn(expanded);
   const voiceOn = voiceEnabledForTurn(transport, options);
   const speech = createStreamSpeechTracker();
   let streamed = "";
@@ -52,7 +55,7 @@ export async function handleChatTurn(
   try {
     const reply = await runChatTurn(
       agent,
-      expanded,
+      prompt,
       (text) => {
         streamed += text;
         logStreamChunk(id, text);
