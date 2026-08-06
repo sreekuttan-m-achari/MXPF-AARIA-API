@@ -175,6 +175,80 @@ describe("loadDomainLanguage", () => {
     const result = await loadDomainLanguage({ adoOrg: "digit9" }, { fetchFn });
     assert.deepEqual(result, { text: "", source: "none" });
   });
+
+  it("caps meta-only body fetches and prefers glossary", async () => {
+    clearKbEnv();
+    process.env.AARIA_VIVA_KB_BASE_URL = "https://viva.example";
+    process.env.AARIA_VIVA_DASHBOARD_TOKEN = "dash-tok";
+
+    const urls: string[] = [];
+    const fetchFn: typeof fetch = async (input) => {
+      const url = String(input);
+      urls.push(url);
+      if (url === "https://viva.example/kb") {
+        return new Response(
+          JSON.stringify({
+            entries: [
+              { id: "n1", title: "Note 1", kind: "note" },
+              { id: "g1", title: "Glossary 1", kind: "glossary" },
+              { id: "g2", title: "Glossary 2", kind: "glossary" },
+              { id: "g3", title: "Glossary 3", kind: "glossary" },
+              { id: "n2", title: "Note 2", kind: "note" },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      const id = url.split("/").pop();
+      return new Response(
+        JSON.stringify({ bodyMarkdown: `body-${id}` }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const result = await loadDomainLanguage(
+      {},
+      { fetchFn, maxEntries: 2 },
+    );
+    assert.equal(result.source, "viva");
+    assert.match(result.text, /Glossary 1/);
+    assert.match(result.text, /Glossary 2/);
+    assert.equal(result.text.includes("Glossary 3"), false);
+    assert.equal(result.text.includes("Note 1"), false);
+    const bodyFetches = urls.filter((u) => /\/kb\/g\d$/.test(u));
+    assert.equal(bodyFetches.length, 2);
+    assert.equal(urls.some((u) => u.endsWith("/kb/n1") || u.endsWith("/kb/n2")), false);
+  });
+
+  it("treats timed-out VIVA fetch as soft miss", async () => {
+    clearKbEnv();
+    process.env.AARIA_VIVA_KB_BASE_URL = "https://viva.example";
+    process.env.AARIA_VIVA_DASHBOARD_TOKEN = "dash-tok";
+
+    const fetchFn: typeof fetch = async (_input, init) => {
+      await new Promise<never>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) {
+          reject(new Error("missing abort signal"));
+          return;
+        }
+        if (signal.aborted) {
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () =>
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+      throw new Error("unreachable");
+    };
+
+    const result = await loadDomainLanguage({}, { fetchFn, timeoutMs: 20 });
+    assert.deepEqual(result, { text: "", source: "none" });
+  });
 });
 
 describe("isCodingAdjacentTurn", () => {

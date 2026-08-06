@@ -20,9 +20,15 @@ export type LoadDomainLanguageOptions = {
   fetchFn?: typeof fetch;
   env?: NodeJS.ProcessEnv;
   maxChars?: number;
+  /** Cap glossary/body fetches (default 8). */
+  maxEntries?: number;
+  /** Per-request timeout in ms (default 8000). */
+  timeoutMs?: number;
 };
 
 const DEFAULT_MAX_CHARS = 4000;
+const DEFAULT_MAX_ENTRIES = 8;
+const DEFAULT_FETCH_TIMEOUT_MS = 8000;
 
 /** Default Confluence space map aligned with VIVA dual-write defaults. */
 const DEFAULT_SPACE_MAP = {
@@ -71,16 +77,31 @@ export async function loadDomainLanguage(
   const env = opts.env ?? process.env;
   const fetchFn = opts.fetchFn ?? fetch;
   const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
+  const maxEntries = opts.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
 
   try {
     if (isVivaConfigured(env)) {
-      const viva = await fetchFromViva(scope, env, fetchFn, maxChars);
+      const viva = await fetchFromViva(
+        scope,
+        env,
+        fetchFn,
+        maxChars,
+        maxEntries,
+        timeoutMs,
+      );
       if (viva.ok) {
         return { text: viva.text, source: "viva" };
       }
       // transport / 5xx only → Confluence when configured
       if (viva.retryable && isConfluenceConfigured(env)) {
-        const cf = await fetchFromConfluence(scope, env, fetchFn, maxChars);
+        const cf = await fetchFromConfluence(
+          scope,
+          env,
+          fetchFn,
+          maxChars,
+          timeoutMs,
+        );
         if (cf.ok && cf.text) {
           console.error(
             "[domain-language] VIVA /kb failed; using Confluence fallback",
@@ -92,7 +113,13 @@ export async function loadDomainLanguage(
     }
 
     if (isConfluenceConfigured(env)) {
-      const cf = await fetchFromConfluence(scope, env, fetchFn, maxChars);
+      const cf = await fetchFromConfluence(
+        scope,
+        env,
+        fetchFn,
+        maxChars,
+        timeoutMs,
+      );
       if (cf.ok && cf.text) {
         return { text: cf.text, source: "confluence" };
       }
@@ -145,6 +172,8 @@ async function fetchFromViva(
   env: NodeJS.ProcessEnv,
   fetchFn: typeof fetch,
   maxChars: number,
+  maxEntries: number,
+  timeoutMs: number,
 ): Promise<FetchOk | FetchMiss> {
   const base = env.AARIA_VIVA_KB_BASE_URL!.trim().replace(/\/$/, "");
   const token = env.AARIA_VIVA_DASHBOARD_TOKEN!.trim();
@@ -158,12 +187,12 @@ async function fetchFromViva(
   const listUrl = `${base}/kb${qs.toString() ? `?${qs}` : ""}`;
   let res: Response;
   try {
-    res = await fetchFn(listUrl, {
+    res = await timedFetch(fetchFn, listUrl, {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: "application/json",
       },
-    });
+    }, timeoutMs);
   } catch {
     return { ok: false, retryable: true };
   }
@@ -180,14 +209,13 @@ async function fetchFromViva(
     return { ok: false, retryable: true };
   }
 
-  const entries = normalizeVivaEntries(data);
-  const sorted = sortGlossaryFirst(entries);
+  const entries = selectVivaEntries(normalizeVivaEntries(data), maxEntries);
   const parts: string[] = [];
 
-  for (const entry of sorted) {
+  for (const entry of entries) {
     let body = entry.bodyMarkdown?.trim() ?? "";
     if (!body && entry.id) {
-      body = await fetchVivaBody(base, token, entry.id, fetchFn);
+      body = await fetchVivaBody(base, token, entry.id, fetchFn, timeoutMs);
     }
     if (!entry.title && !body) continue;
     parts.push([`### ${entry.title || "Untitled"}`, body].filter(Boolean).join("\n"));
@@ -201,14 +229,20 @@ async function fetchVivaBody(
   token: string,
   id: string,
   fetchFn: typeof fetch,
+  timeoutMs: number,
 ): Promise<string> {
   try {
-    const res = await fetchFn(`${base}/kb/${encodeURIComponent(id)}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
+    const res = await timedFetch(
+      fetchFn,
+      `${base}/kb/${encodeURIComponent(id)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
       },
-    });
+      timeoutMs,
+    );
     if (!res.ok) return "";
     const data = (await res.json()) as { bodyMarkdown?: string };
     return typeof data.bodyMarkdown === "string" ? data.bodyMarkdown.trim() : "";
@@ -244,11 +278,44 @@ function sortGlossaryFirst(entries: VivaEntry[]): VivaEntry[] {
   });
 }
 
+/** Prefer glossary entries, then cap how many bodies we materialize. */
+function selectVivaEntries(entries: VivaEntry[], maxEntries: number): VivaEntry[] {
+  const limit = Math.max(0, maxEntries);
+  if (!limit) return [];
+  const glossaries = entries.filter((e) => (e.kind ?? "note") === "glossary");
+  const preferred = glossaries.length ? glossaries : sortGlossaryFirst(entries);
+  return preferred.slice(0, limit);
+}
+
+async function timedFetch(
+  fetchFn: typeof fetch,
+  input: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const ms = Math.max(1, timeoutMs);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    const parent = init.signal;
+    if (parent) {
+      if (parent.aborted) controller.abort();
+      else {
+        parent.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+    }
+    return await fetchFn(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchFromConfluence(
   scope: DomainLanguageScope,
   env: NodeJS.ProcessEnv,
   fetchFn: typeof fetch,
   maxChars: number,
+  timeoutMs: number,
 ): Promise<FetchOk | FetchMiss> {
   const base = env.AARIA_CONFLUENCE_BASE_URL!.trim().replace(/\/$/, "");
   const email = env.AARIA_CONFLUENCE_EMAIL!.trim();
@@ -279,7 +346,7 @@ async function fetchFromConfluence(
         expand: "body.storage",
       });
       const url = `${base}/wiki/rest/api/content/search?${qs.toString()}`;
-      const res = await fetchFn(url, { headers });
+      const res = await timedFetch(fetchFn, url, { headers }, timeoutMs);
       if (!res.ok) continue;
       anyOk = true;
       const data = (await res.json()) as {
