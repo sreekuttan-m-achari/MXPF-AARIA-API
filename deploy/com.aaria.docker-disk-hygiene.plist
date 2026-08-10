@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.aaria.docker-disk-hygiene</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/sreekuttan/AI/MXPF-AARIA-API/deploy/aaria-docker-disk-hygiene.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/sreekuttan/AI/MXPF-AARIA-API</string>
+	<!-- Daily 07:30 local (Asia/Kolkata on this host) -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>7</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/sreekuttan/Library/Logs/aaria/docker-disk-hygiene.launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/sreekuttan/Library/Logs/aaria/docker-disk-hygiene.launchd.err.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/sreekuttan</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/Users/sreekuttan/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>AARIA_DISK_FREE_WARN_GIB</key>
+		<string>15</string>
+		<key>AARIA_DISK_FREE_CRIT_GIB</key>
+		<string>8</string>
+	</dict>
+</dict>
+</plist>
