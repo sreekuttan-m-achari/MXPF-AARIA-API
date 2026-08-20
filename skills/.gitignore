@@ -1,1 +1,6 @@
+# Host-specific / private skills (do not publish)
 viva-ops
+astra-minion-on-amelia-pi
+fix-nvm-npmrc-prefix-blocking-astra-install
+recover-astra-user-service-missing-on-amelia
+sync-astra-fleet-md-from-hivemq
