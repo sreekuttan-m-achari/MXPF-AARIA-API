@@ -106,6 +106,7 @@ Persona is data-driven — edit `SOUL.md` (who she is), `USER.md` (who you are),
 - **Node.js ≥ 22.13** (uses the built-in `node:sqlite` for the local agent store; see `.nvmrc` → Node 22).
 - **Default brain:** Cursor account + **`CURSOR_API_KEY`**.
 - **Optional Claude brain:** set `AARIA_RUNTIME=claude` and **`ANTHROPIC_API_KEY`** (AARIA only; Amelia/ASTRA stay Cursor).
+- **Planned backup pipes** (OpenRouter / local Ollama via LiteLLM): same Claude harness, alternate base URL — see [Future plans](#future-plans). Keep tools/MCP; not a chat-only client.
 
 **npm dependencies** (installed via `npm install`)
 
@@ -306,9 +307,11 @@ All settings are environment variables (see `.env-sample`). Common ones:
 |----------|---------|---------|
 | `AARIA_RUNTIME` | `cursor` | Agent harness: `cursor` or `claude` (alias `anthropic`). AARIA only. |
 | `CURSOR_API_KEY` | — | **Required** when `AARIA_RUNTIME=cursor` |
-| `ANTHROPIC_API_KEY` | — | **Required** when `AARIA_RUNTIME=claude` |
-| `AARIA_MODEL` | `default` (Auto) | Model id for the active runtime. Cursor: `default` / `composer-*`. Claude: Claude model id (or leave default → `AARIA_CLAUDE_MODEL`) |
+| `ANTHROPIC_API_KEY` | — | **Required** when `AARIA_RUNTIME=claude` (direct Anthropic) |
+| `AARIA_MODEL` | `default` (Auto) | Model id for the active runtime. Cursor: `default` / `composer-*`. Claude: Claude or OpenRouter-style id |
 | `AARIA_CLAUDE_MODEL` | `claude-sonnet-4-5` | Fallback Claude model when `AARIA_MODEL` is unset / `default` / `composer-*` |
+| `AARIA_LLM_BASE_URL` | — | **Planned.** Claude-harness model pipe (e.g. `https://openrouter.ai/api` or LiteLLM/Ollama Anthropic-compat URL). See [Future plans](#future-plans) |
+| `AARIA_LLM_API_KEY` | — | **Planned.** Key for that pipe (`OPENROUTER_API_KEY`, etc.) |
 | `AARIA_LEARN_MODEL` | same as `AARIA_MODEL` default (`default`) | Model for learn/curator agent |
 | `AARIA_WS_HOST` | `127.0.0.1` (`0.0.0.0` in Docker) | Bind address |
 | `AARIA_WS_PORT` | `8788` | HTTP/WS port |
@@ -594,9 +597,55 @@ AARIA’s reach to remote assets. Keep work with AARIA, home with Amelia, sites 
 
 ## Future plans
 
-AARIA can switch harness via `AARIA_RUNTIME` (`cursor` default, or `claude`). Amelia and ASTRA are still Cursor-only.
+### Harness vs model pipe
 
-**Later (cross-project):** more brain adapters (OpenRouter, OpenAI, Grok/xAI) and the same switch for Amelia/ASTRA. See:
+AARIA already switches **harness** via `AARIA_RUNTIME`:
+
+| Value | Harness | Token / billing today |
+|-------|---------|------------------------|
+| `cursor` (default) | `@cursor/sdk` | `CURSOR_API_KEY` |
+| `claude` | `@anthropic-ai/claude-agent-sdk` | `ANTHROPIC_API_KEY` (direct Anthropic) |
+
+**OpenRouter / Ollama are not a third harness.** They are **model pipes** — alternate places to get tokens while keeping the same agent loop (tools, MCP, sessions, cancel). Planned approach: keep `AARIA_RUNTIME=claude` and point the Claude Agent SDK at a compatible base URL when Cursor or Anthropic quota runs out.
+
+```text
+AriaAgent
+  ├── cursor  → Cursor platform models
+  └── claude  → Anthropic API
+              → OpenRouter (Anthropic-compatible skin)   ← planned backup
+              → LiteLLM / Ollama Anthropic-compat proxy ← planned local backup
+```
+
+Do **not** add a chat-completions-only OpenRouter/Ollama path — that drops harness functionality.
+
+### Planned failover / switch-over
+
+When Cursor or Anthropic usage is exhausted (or for cost/local preference):
+
+1. Set `AARIA_RUNTIME=claude`.
+2. Point the Claude harness at a backup pipe (env names reserved in `.env-sample`; wiring TBD):
+
+```bash
+# Backup via OpenRouter (keeps tools/MCP via Claude Agent SDK)
+AARIA_RUNTIME=claude
+AARIA_LLM_BASE_URL=https://openrouter.ai/api
+AARIA_LLM_API_KEY=sk-or-...
+AARIA_MODEL=anthropic/claude-sonnet-4.5
+
+# Or local via LiteLLM in front of Ollama (recommended over raw Ollama)
+# AARIA_LLM_BASE_URL=http://127.0.0.1:4000
+# AARIA_LLM_API_KEY=unused
+# AARIA_MODEL=llama3.1
+```
+
+Under the hood the Claude runtime will map those into the Agent SDK’s Anthropic env bridge (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`, with `ANTHROPIC_API_KEY` blanked) — same pattern [OpenRouter documents for the Agent SDK](https://openrouter.ai/docs/guides/community/anthropic-agent-sdk).
+
+**Notes**
+
+- Session IDs stay per-runtime; switching Cursor ↔ Claude (or Anthropic ↔ OpenRouter pipe) starts a fresh conversation unless you re-bootstrap persona.
+- Small local models often struggle with multi-step tool use; prefer capable OpenRouter models or strong local instruct models for desk ops.
+- Cursor SDK custom OpenAI base URLs are a poor fit for localhost Ollama (often routed via Cursor cloud). Prefer the Claude-runtime pipe for local/backup.
+- Amelia and ASTRA stay Cursor-only until a later pass.
 
 → [`docs/superpowers/specs/2026-07-28-switchable-agent-runtime-design.md`](docs/superpowers/specs/2026-07-28-switchable-agent-runtime-design.md)  
 → [`docs/superpowers/specs/2026-07-20-pluggable-ai-brain-future.md`](docs/superpowers/specs/2026-07-20-pluggable-ai-brain-future.md)

@@ -90,6 +90,8 @@ Per-product env prefix examples: `AARIA_BRAIN_PROVIDER`, `VIVA_BRAIN_PROVIDER`, 
 5. **Audit** — log `provider`, `model`, token usage (when available), and `runId`; never log raw keys.
 6. **Incremental rollout** — ship one non-Cursor adapter (likely **OpenRouter** first — widest model surface, OpenAI-compatible API) before direct vendor SDKs.
 
+**AARIA refinement (2026-08):** Prefer OpenRouter/Ollama as a **model pipe on the Claude Agent SDK harness** (`AARIA_RUNTIME=claude` + `AARIA_LLM_BASE_URL`), not as a separate chat-completions brain. That preserves tools/MCP when Cursor/Anthropic tokens run out. See `2026-07-28-switchable-agent-runtime-design.md`.
+
 ---
 
 ## 5. Per-product notes
