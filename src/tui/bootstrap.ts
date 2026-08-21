@@ -6,6 +6,7 @@ export type Health = {
   ok: boolean;
   name?: string;
   version?: string;
+  runtime?: string;
   warm?: boolean;
   greeting?: string;
   sessionId?: string;
