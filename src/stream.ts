@@ -73,6 +73,10 @@ export function createStreamingCollector(
       if (typeof code === "string" && code.length > 0) {
         lastErrorCode = code;
       }
+      const msg = (event as { message?: unknown }).message;
+      if (typeof msg === "string" && msg.trim()) {
+        lastStatusMessage = msg.trim();
+      }
       return;
     }
 
@@ -225,7 +229,13 @@ async function runChatTurnOnce(
     });
 
     const reply = collector.getText().trim();
-    return reply || "(no reply)";
+    if (reply) return reply;
+    const fallback = result.result?.trim();
+    if (fallback) return fallback;
+    return (
+      "(no reply — empty model output. OpenRouter free can flake; retry, " +
+      "or pin MXPF_HARNESS_MODEL to a specific :free model.)"
+    );
   } catch (err) {
     if (err instanceof ChatCancelledError) {
       throw err;

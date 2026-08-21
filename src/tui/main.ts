@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import readline from "node:readline/promises";
+import { clearLine, cursorTo } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 
 import { ensureServerReady, fetchHealth, resetSession, setVoiceMode, speakOnServer, backgroundServiceName, warmVoiceEngine, type Health } from "./bootstrap.js";
@@ -95,7 +96,15 @@ function formatBootStatusStrip(health: Health): string {
         Math.max(1, ctx.prompts.userLearnedLimit)) *
         100,
     );
-    parts.push(formatHeatStatusLine({ ctxPct, memPct, userPct }));
+    parts.push(
+      formatHeatStatusLine({
+        ctxPct,
+        memPct,
+        userPct,
+        usedTokens: ctx.window.usedTokens,
+        limitTokens: ctx.window.limitTokens,
+      }),
+    );
   }
   return parts.join(`${c.dim} · ${c.reset}`);
 }
@@ -166,11 +175,23 @@ async function main(): Promise<void> {
   let pendingGreeting: string | undefined;
   let bootUiReady = false;
 
+  /**
+   * Async WS events (greeting / brief / learn) may fire while readline owns the
+   * line. Writing raw stdout then causes crosstalk like
+   * `Sree > all Aaria > Hello…`. Clear the input row, write, then redraw.
+   * Assigned for real after `rl` + `prompt` exist.
+   */
+  let emitAbovePrompt: (write: () => void) => void = (write) => {
+    write();
+  };
+
   const presentGreeting = (text: string): void => {
     const line = text.trim();
     if (!line || spokeStartupGreeting) return;
     spokeStartupGreeting = true;
-    output.write(`${agentPrefix()}${colorizeReplyChunk(line)}\n\n`);
+    emitAbovePrompt(() => {
+      output.write(`${agentPrefix()}${colorizeReplyChunk(line)}\n\n`);
+    });
     void speakOnServer(line, "greeting");
   };
 
@@ -201,11 +222,13 @@ async function main(): Promise<void> {
       const full = (briefBuffer || text).trim();
       briefBuffer = "";
       briefStreaming = false;
-      output.write(
-        `\n${agentPrefix()}${c.gold}${c.bold}Morning brief${c.reset}\n` +
-          `${c.dim}${"─".repeat(28)}${c.reset}\n` +
-          `${colorizeReplyChunk(full)}\n\n`,
-      );
+      emitAbovePrompt(() => {
+        output.write(
+          `\n${agentPrefix()}${c.gold}${c.bold}Morning brief${c.reset}\n` +
+            `${c.dim}${"─".repeat(28)}${c.reset}\n` +
+            `${colorizeReplyChunk(full)}\n\n`,
+        );
+      });
       if (!streaming) {
         prompt();
       }
@@ -219,9 +242,11 @@ async function main(): Promise<void> {
     const style = learnTargetStyle(event.target);
     const label = event.staged ? `${c.warn}staged${c.reset}` : `${c.ok}learned${c.reset}`;
     const id = event.pendingId ? ` ${c.dim}· ${event.pendingId}${c.reset}` : "";
-    output.write(
-      `\n${c.gold}💾${c.reset} ${label} ${c.dim}→${c.reset} ${style.color}${style.label}${c.reset}${id}: ${c.text}${event.preview}${c.reset}\n`,
-    );
+    emitAbovePrompt(() => {
+      output.write(
+        `\n${c.gold}💾${c.reset} ${label} ${c.dim}→${c.reset} ${style.color}${style.label}${c.reset}${id}: ${c.text}${event.preview}${c.reset}\n`,
+      );
+    });
     if (!streaming) {
       prompt();
     }
@@ -488,12 +513,11 @@ async function main(): Promise<void> {
       if (opsOpen || filesOpen) {
         return;
       }
-      output.write(
-        `\n${c.warn}◌ reconnecting…${c.reset}${detail ? ` ${c.dim}${detail}${c.reset}` : ""}\n`,
-      );
-      if (!streaming) {
-        prompt();
-      }
+      emitAbovePrompt(() => {
+        output.write(
+          `\n${c.warn}◌ reconnecting…${c.reset}${detail ? ` ${c.dim}${detail}${c.reset}` : ""}\n`,
+        );
+      });
       return;
     }
     if (state === "connected" && announcedDisconnect) {
@@ -501,10 +525,9 @@ async function main(): Promise<void> {
       if (opsOpen || filesOpen) {
         return;
       }
-      output.write(`\n${c.ok}● uplink restored${c.reset}\n`);
-      if (!streaming) {
-        prompt();
-      }
+      emitAbovePrompt(() => {
+        output.write(`\n${c.ok}● uplink restored${c.reset}\n`);
+      });
     }
   });
 
@@ -549,6 +572,25 @@ async function main(): Promise<void> {
     }
     output.write("\x1b[K");
     ghostSuffix = "";
+  };
+
+  /** Clear the active readline row, write status text, redraw prompt + buffer. */
+  emitAbovePrompt = (write: () => void): void => {
+    if (closed || opsOpen || filesOpen) {
+      write();
+      return;
+    }
+    if (interactive && output.isTTY) {
+      clearHint();
+      clearLine(output, 0);
+      cursorTo(output, 0);
+      write();
+      if (!streaming && !inputSuspended) {
+        rl.prompt(true);
+      }
+      return;
+    }
+    write();
   };
 
   /**
@@ -800,7 +842,13 @@ async function main(): Promise<void> {
                 100,
             );
             ctxLine =
-              `\n${formatHeatStatusLine({ ctxPct, memPct, userPct })}` +
+              `\n${formatHeatStatusLine({
+                ctxPct,
+                memPct,
+                userPct,
+                usedTokens: ctx.window.usedTokens,
+                limitTokens: ctx.window.limitTokens,
+              })}` +
               `${c.dim} · standing ${ctx.prompts.standingChars}ch${c.reset}`;
           }
           output.write(
@@ -990,7 +1038,13 @@ async function main(): Promise<void> {
                     100,
                 );
                 output.write(
-                  `\n${formatHeatStatusLine({ ctxPct, memPct, userPct })}`,
+                  `\n${formatHeatStatusLine({
+                    ctxPct,
+                    memPct,
+                    userPct,
+                    usedTokens: context.window.usedTokens,
+                    limitTokens: context.window.limitTokens,
+                  })}`,
                 );
               }
             });

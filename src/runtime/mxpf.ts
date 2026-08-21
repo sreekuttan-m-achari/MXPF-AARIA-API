@@ -34,7 +34,11 @@ function toStreamEvent(event: HarnessEvent): unknown | undefined {
     };
   }
   if (event.type === "error") {
-    return { type: "result", errorCode: event.name || "error" };
+    return {
+      type: "result",
+      errorCode: event.name || "error",
+      message: event.message,
+    };
   }
   return undefined;
 }
@@ -57,10 +61,14 @@ function wrapMxpfRun(run: MxpfRun): AriaRun {
     },
     async wait(): Promise<AriaRunResult> {
       const result = await run.wait();
+      const errText =
+        result.error != null
+          ? `${result.error.name}: ${result.error.message}`
+          : null;
       return {
         id: result.id,
         status: result.status,
-        result: result.result ?? null,
+        result: result.result ?? errText,
         model: result.model ? { id: result.model.id } : null,
         durationMs: result.durationMs,
         usage: result.usage,
