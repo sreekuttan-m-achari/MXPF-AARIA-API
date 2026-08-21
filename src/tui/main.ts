@@ -69,7 +69,39 @@ ${c.accent}Home and Home Assistant${c.reset}${c.dim} → Amelia.${c.reset}
 `);
 }
 
-function printBanner(health: Health): void {
+function formatBootStatusStrip(health: Health): string {
+  const parts: string[] = [];
+  if (health.voice) {
+    const on = health.voice.enabled;
+    parts.push(
+      `voice ${on ? `${c.ok}on${c.reset}` : `${c.warn}off${c.reset}`}${c.dim} · ${health.voice.engine || "off"}${c.reset}`,
+    );
+  }
+  const runtime = health.runtime;
+  if (runtime) {
+    parts.push(`${c.dim}runtime=${c.reset}${c.teal}${runtime}${c.reset}`);
+  }
+  const ctx = health.context;
+  if (ctx) {
+    const ctxPct =
+      ctx.window.percent != null && ctx.window.usedTokens != null
+        ? ctx.window.percent
+        : null;
+    const memPct = Math.round(
+      (ctx.prompts.memoryChars / Math.max(1, ctx.prompts.memoryLimit)) * 100,
+    );
+    const userPct = Math.round(
+      (ctx.prompts.userLearnedChars /
+        Math.max(1, ctx.prompts.userLearnedLimit)) *
+        100,
+    );
+    parts.push(formatHeatStatusLine({ ctxPct, memPct, userPct }));
+  }
+  return parts.join(`${c.dim} · ${c.reset}`);
+}
+
+/** Quiet first paint: banner + status + hint (full command list is /help only). */
+function printBootUi(health: Health): void {
   output.write("\n");
   output.write(` ${ariaWordmark()} ${c.dim}work desk · ${c.teal}${apiBase()}${c.reset}\n`);
   if (health.version) {
@@ -77,7 +109,13 @@ function printBanner(health: Health): void {
       `${c.dim}v${health.version}${health.sessionId ? ` · session ${c.plum}${health.sessionId.slice(0, 12)}…${c.reset}${c.dim}` : ""}${c.reset}\n`,
     );
   }
-  output.write("\n");
+  const strip = formatBootStatusStrip(health);
+  if (strip) {
+    output.write(`${strip}\n`);
+  }
+  output.write(
+    `${c.dim}type ${c.cmd}/${c.reset}${c.dim} for commands · ${c.cmd}/help${c.reset}${c.dim} for full list${c.reset}\n\n`,
+  );
 }
 
 async function main(): Promise<void> {
@@ -107,20 +145,23 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  loader.setPhase("priming voice");
-  const voiceWarm =
-    health.voice?.enabled === false
-      ? { ok: true as const, skipped: true }
-      : await warmVoiceEngine();
+  const voiceOff = health.voice?.enabled === false;
+  if (voiceOff) {
+    loader.setPhase("voice off");
+  } else {
+    loader.setPhase("priming voice");
+  }
+  const voiceWarm = voiceOff
+    ? { ok: true as const, skipped: true }
+    : await warmVoiceEngine();
   if (voiceWarm.ok && "ms" in voiceWarm && voiceWarm.ms && voiceWarm.ms > 0) {
     loader.setPhase(`voice ready (${voiceWarm.ms}ms)`);
-  } else if (health.voice?.enabled === false) {
-    loader.setPhase("voice off");
   }
 
   const client = new AriaWsClient();
   let userName: string | undefined;
   let briefStreaming = false;
+  let briefBuffer = "";
   let spokeStartupGreeting = false;
   let pendingGreeting: string | undefined;
   let bootUiReady = false;
@@ -149,19 +190,22 @@ async function main(): Promise<void> {
 
   client.onMorningBrief({
     onChunk: (text) => {
+      // Buffer only — style once on complete brief so mid-chunk **markdown** is not left raw.
       if (!briefStreaming) {
         briefStreaming = true;
-        output.write(`\n${agentPrefix()}${c.gold}${c.bold}Morning brief${c.reset}\n`);
+        briefBuffer = "";
       }
-      output.write(colorizeReplyChunk(text));
+      briefBuffer += text;
     },
     onBrief: (text) => {
-      if (!briefStreaming) {
-        output.write(`\n${agentPrefix()}${c.gold}${c.bold}Morning brief${c.reset}\n${colorizeReplyChunk(text.trim())}\n\n`);
-      } else {
-        output.write("\n\n");
-      }
+      const full = (briefBuffer || text).trim();
+      briefBuffer = "";
       briefStreaming = false;
+      output.write(
+        `\n${agentPrefix()}${c.gold}${c.bold}Morning brief${c.reset}\n` +
+          `${c.dim}${"─".repeat(28)}${c.reset}\n` +
+          `${colorizeReplyChunk(full)}\n\n`,
+      );
       if (!streaming) {
         prompt();
       }
@@ -187,7 +231,7 @@ async function main(): Promise<void> {
     const ready = await client.connect();
     userName = ready.userName || health.user;
     loader.stop();
-    printBanner(health);
+    printBootUi(health);
     if (startedService) {
       output.write(`${c.dim}started ${backgroundServiceName()}${c.reset}\n`);
     }
@@ -1216,7 +1260,6 @@ async function main(): Promise<void> {
     }
   });
 
-  printHelp();
   loadFilesAgentCompletions();
   bootUiReady = true;
   if (pendingGreeting) {
