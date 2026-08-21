@@ -17,6 +17,7 @@ import {
   persistAgentId,
   sessionDir,
 } from "../session.js";
+import { resolveMxpfProvider } from "./mxpf-pipe.js";
 import type { AriaAgent, AriaRun, AriaRunResult } from "./types.js";
 
 let resumed = false;
@@ -104,20 +105,6 @@ function resolveMxpfBaseURL(): string | undefined {
     process.env.AARIA_LLM_BASE_URL?.trim() ||
     "";
   return raw.length > 0 ? raw : undefined;
-}
-
-function resolveMxpfProvider(baseURL?: string): ModelProvider {
-  const raw =
-    process.env.MXPF_HARNESS_PROVIDER?.trim().toLowerCase() ||
-    process.env.AARIA_MXPF_PROVIDER?.trim().toLowerCase() ||
-    "";
-  if (raw === "anthropic" || raw === "openai") return raw;
-  if (baseURL?.includes("openrouter") || baseURL?.includes("ollama")) {
-    return "openai";
-  }
-  if (baseURL?.includes("anthropic")) return "anthropic";
-  // Desk default for OpenRouter-style free pipes
-  return "openai";
 }
 
 function resolveMxpfModelId(provider: ModelProvider): string {
