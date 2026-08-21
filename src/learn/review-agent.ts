@@ -11,6 +11,7 @@ import {
 import { resolveModelSelection } from "../config/model.js";
 import { agentCwd } from "../persona.js";
 import { createClaudeSessionAgent } from "../runtime/claude.js";
+import { createMxpfSessionAgent } from "../runtime/mxpf.js";
 import { resolveRuntimeKind } from "../runtime/kind.js";
 import type { AriaAgent, AriaRun, AriaRunResult } from "../runtime/types.js";
 import { sessionDir } from "../session.js";
@@ -133,6 +134,10 @@ function learnSessionFile(cwd: string): string {
   return join(sessionDir(cwd), "agent-id.claude.learn.txt");
 }
 
+function learnMxpfSessionFile(cwd: string): string {
+  return join(sessionDir(cwd), "agent-id.mxpf.learn.txt");
+}
+
 async function createClaudeReviewAgent(): Promise<AriaAgent> {
   const cwd = agentCwd();
   const path = learnSessionFile(cwd);
@@ -153,16 +158,39 @@ async function createClaudeReviewAgent(): Promise<AriaAgent> {
   });
 }
 
+async function createMxpfReviewAgent(): Promise<AriaAgent> {
+  const cwd = agentCwd();
+  const path = learnMxpfSessionFile(cwd);
+  return createMxpfSessionAgent({
+    mcp: false,
+    builtins: [],
+    trackResume: false,
+    label: "learn",
+    loadSessionId: () => {
+      if (!existsSync(path)) return undefined;
+      const id = readFileSync(path, "utf8").trim();
+      return id.length > 0 ? id : undefined;
+    },
+    persistSessionId: (id) => {
+      writeFileSync(path, `${id}\n`, "utf8");
+    },
+  });
+}
+
 /** Lightweight agent for learn review + curator (no MCP, separate session). */
 export async function getReviewAgent(): Promise<ReviewAgent> {
   if (reviewAgent) {
     return reviewAgent;
   }
 
-  reviewAgent =
-    resolveRuntimeKind() === "claude"
-      ? await createClaudeReviewAgent()
-      : await createCursorReviewAgent();
+  const kind = resolveRuntimeKind();
+  if (kind === "claude") {
+    reviewAgent = await createClaudeReviewAgent();
+  } else if (kind === "mxpf") {
+    reviewAgent = await createMxpfReviewAgent();
+  } else {
+    reviewAgent = await createCursorReviewAgent();
+  }
   return reviewAgent;
 }
 

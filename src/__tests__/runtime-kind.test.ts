@@ -48,6 +48,13 @@ describe("resolveRuntimeKind", () => {
     assert.equal(resolveRuntimeKind(), "claude");
   });
 
+  it("accepts mxpf aliases", () => {
+    setEnv("AARIA_RUNTIME", "mxpf");
+    assert.equal(resolveRuntimeKind(), "mxpf");
+    setEnv("AARIA_RUNTIME", "maximprof");
+    assert.equal(resolveRuntimeKind(), "mxpf");
+  });
+
   it("falls back to cursor for unknown values", () => {
     setEnv("AARIA_RUNTIME", "openrouter");
     assert.equal(resolveRuntimeKind(), "cursor");

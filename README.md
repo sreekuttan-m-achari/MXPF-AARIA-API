@@ -106,12 +106,15 @@ Persona is data-driven — edit `SOUL.md` (who she is), `USER.md` (who you are),
 - **Node.js ≥ 22.13** (uses the built-in `node:sqlite` for the local agent store; see `.nvmrc` → Node 22).
 - **Default brain:** Cursor account + **`CURSOR_API_KEY`**.
 - **Optional Claude brain:** set `AARIA_RUNTIME=claude` and **`ANTHROPIC_API_KEY`** (AARIA only; Amelia/ASTRA stay Cursor).
+- **Optional MXPF brain:** set `AARIA_RUNTIME=mxpf` and **`MXPF_HARNESS_API_KEY`** (uses published [`mxpf-ai-harness`](https://www.npmjs.com/package/mxpf-ai-harness); OpenRouter free works via OpenAI-compatible pipe).
+- **Default remains Cursor** when `AARIA_RUNTIME` is unset.
 - **Planned backup pipes** (OpenRouter / local Ollama via LiteLLM): same Claude harness, alternate base URL — see [Future plans](#future-plans). Keep tools/MCP; not a chat-only client.
 
 **npm dependencies** (installed via `npm install`)
 
 - `@cursor/sdk` — default agent runtime
 - `@anthropic-ai/claude-agent-sdk` — optional Claude Agent SDK runtime (`AARIA_RUNTIME=claude`)
+- `mxpf-ai-harness` — optional MaximProf harness (`AARIA_RUNTIME=mxpf`)
 - `@modelcontextprotocol/sdk`, `@modelcontextprotocol/server-memory` — MCP + bundled memory server
 - `ws` — WebSocket server
 - `node-cron` — cron expressions for scheduled jobs
@@ -305,9 +308,13 @@ All settings are environment variables (see `.env-sample`). Common ones:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AARIA_RUNTIME` | `cursor` | Agent harness: `cursor` or `claude` (alias `anthropic`). AARIA only. |
+| `AARIA_RUNTIME` | `cursor` | Agent harness: `cursor`, `claude` (alias `anthropic`), or `mxpf` (aliases `aaria` / `maximprof`). AARIA only. |
 | `CURSOR_API_KEY` | — | **Required** when `AARIA_RUNTIME=cursor` |
 | `ANTHROPIC_API_KEY` | — | **Required** when `AARIA_RUNTIME=claude` (direct Anthropic) |
+| `MXPF_HARNESS_API_KEY` | — | **Required** when `AARIA_RUNTIME=mxpf` (aliases: `AARIA_LLM_API_KEY`, `OPENROUTER_API_KEY`) |
+| `MXPF_HARNESS_BASE_URL` | — | Optional pipe for mxpf (e.g. `https://openrouter.ai/api/v1`) |
+| `MXPF_HARNESS_PROVIDER` | `openai` | `openai` or `anthropic` for mxpf model client |
+| `MXPF_HARNESS_MODEL` | — | Optional; else `AARIA_MODEL` or `openrouter/free` / `claude-sonnet-4-5` |
 | `AARIA_MODEL` | `default` (Auto) | Model id for the active runtime. Cursor: `default` / `composer-*`. Claude: Claude or OpenRouter-style id |
 | `AARIA_CLAUDE_MODEL` | `claude-sonnet-4-5` | Fallback Claude model when `AARIA_MODEL` is unset / `default` / `composer-*` |
 | `AARIA_LLM_BASE_URL` | — | **Planned.** Claude-harness model pipe (e.g. `https://openrouter.ai/api` or LiteLLM/Ollama Anthropic-compat URL). See [Future plans](#future-plans) |
@@ -605,25 +612,37 @@ AARIA already switches **harness** via `AARIA_RUNTIME`:
 |-------|---------|------------------------|
 | `cursor` (default) | `@cursor/sdk` | `CURSOR_API_KEY` |
 | `claude` | `@anthropic-ai/claude-agent-sdk` | `ANTHROPIC_API_KEY` (direct Anthropic) |
+| `mxpf` | `mxpf-ai-harness` | `MXPF_HARNESS_API_KEY` (+ optional OpenAI/Anthropic-compat pipes) |
 
-**OpenRouter / Ollama are not a third harness.** They are **model pipes** — alternate places to get tokens while keeping the same agent loop (tools, MCP, sessions, cancel). Planned approach: keep `AARIA_RUNTIME=claude` and point the Claude Agent SDK at a compatible base URL when Cursor or Anthropic quota runs out.
+**OpenRouter on mxpf** (full tool loop, OpenAI-compatible):
+
+```bash
+AARIA_RUNTIME=mxpf
+MXPF_HARNESS_API_KEY=sk-or-v1-...
+MXPF_HARNESS_PROVIDER=openai
+MXPF_HARNESS_MODEL=openrouter/free
+MXPF_HARNESS_BASE_URL=https://openrouter.ai/api/v1
+```
+
+**OpenRouter / Ollama on Claude** remain **model pipes** on the Claude harness (Anthropic-compatible skin), not chat-completions-only clients:
 
 ```text
 AriaAgent
   ├── cursor  → Cursor platform models
-  └── claude  → Anthropic API
-              → OpenRouter (Anthropic-compatible skin)   ← planned backup
-              → LiteLLM / Ollama Anthropic-compat proxy ← planned local backup
+  ├── claude  → Anthropic API
+  │           → OpenRouter (Anthropic-compatible skin)   ← planned backup
+  │           → LiteLLM / Ollama Anthropic-compat proxy ← planned local backup
+  └── mxpf    → mxpf-ai-harness (OpenAI- or Anthropic-compat pipes)
 ```
 
-Do **not** add a chat-completions-only OpenRouter/Ollama path — that drops harness functionality.
+Do **not** add a chat-completions-only OpenRouter/Ollama path outside a real harness — that drops tools/MCP.
 
 ### Planned failover / switch-over
 
 When Cursor or Anthropic usage is exhausted (or for cost/local preference):
 
-1. Set `AARIA_RUNTIME=claude`.
-2. Point the Claude harness at a backup pipe (env names reserved in `.env-sample`; wiring TBD):
+1. Prefer `AARIA_RUNTIME=mxpf` with OpenRouter / LiteLLM (see above), **or**
+2. Set `AARIA_RUNTIME=claude` and point the Claude harness at a backup pipe (env names in `.env-sample`; Anthropic-skin wiring TBD):
 
 ```bash
 # Backup via OpenRouter (keeps tools/MCP via Claude Agent SDK)
