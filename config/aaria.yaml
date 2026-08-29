@@ -1,0 +1,6 @@
+# Shared AARIA settings (no secrets).
+# Brain-specific models/URLs live in providers/<runtime>.yaml
+# and are loaded only for AARIA_RUNTIME.
+
+# timezone: Asia/Kolkata
+# agentCwd: /path/to/work

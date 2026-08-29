@@ -11,6 +11,7 @@ import {
 } from "mxpf-ai-harness";
 
 import { loadMcpServersForSdk } from "../config/mcp.js";
+import { loadAariaConfig } from "../config/load.js";
 import { agentCwd } from "../persona.js";
 import {
   loadPersistedAgentId,
@@ -99,17 +100,21 @@ function resolveMxpfApiKey(): string {
 }
 
 function resolveMxpfBaseURL(): string | undefined {
+  const brain = loadAariaConfig().brain;
   const raw =
     process.env.MXPF_HARNESS_BASE_URL?.trim() ||
     process.env.AARIA_LLM_BASE_URL?.trim() ||
+    (brain.kind === "mxpf" ? brain.baseUrl : undefined) ||
     "";
   return raw.length > 0 ? raw : undefined;
 }
 
 function resolveMxpfProvider(baseURL?: string): ModelProvider {
+  const brain = loadAariaConfig().brain;
   const raw =
     process.env.MXPF_HARNESS_PROVIDER?.trim().toLowerCase() ||
     process.env.AARIA_MXPF_PROVIDER?.trim().toLowerCase() ||
+    (brain.kind === "mxpf" ? brain.provider : undefined) ||
     "";
   if (raw === "anthropic" || raw === "openai") return raw;
   if (baseURL?.includes("openrouter") || baseURL?.includes("ollama")) {
@@ -127,12 +132,16 @@ function resolveMxpfModelId(provider: ModelProvider): string {
   if (raw && raw !== "default" && !raw.startsWith("composer")) {
     return raw;
   }
+  const configured = loadAariaConfig().brain;
+  if (configured.kind === "mxpf" && configured.model) return configured.model;
   return provider === "anthropic" ? "claude-sonnet-4-5" : "openrouter/free";
 }
 
 function resolvePermissionMode(): PermissionMode {
+  const brain = loadAariaConfig().brain;
   const raw =
     process.env.MXPF_HARNESS_PERMISSION_MODE?.trim().toLowerCase() ||
+    (brain.kind === "mxpf" ? brain.permissionMode?.toLowerCase() : undefined) ||
     "bypass";
   if (
     raw === "bypass" ||
@@ -213,6 +222,7 @@ export async function createMxpfSessionAgent(
       mcp: useMcp && Boolean(mcpServers),
       builtins: opts.builtins,
     },
+    context: { autoCompact: true },
     ...(mcpServers ? { mcpServers } : {}),
   };
 

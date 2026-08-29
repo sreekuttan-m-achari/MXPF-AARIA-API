@@ -1,0 +1,6 @@
+# Loaded only when AARIA_RUNTIME=cursor
+# Secrets stay in .env (CURSOR_API_KEY).
+
+# SDK id. `default` = Auto.
+model: default
+learnModel: default

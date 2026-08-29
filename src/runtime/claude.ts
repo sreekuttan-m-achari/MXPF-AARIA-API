@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 import { loadMcpServersForSdk } from "../config/mcp.js";
+import { resolveModelId } from "../config/model.js";
 import { agentCwd } from "../persona.js";
 import {
   loadPersistedAgentId,
@@ -306,7 +307,13 @@ export async function createClaudeSessionAgent(
   }
 
   const cwd = agentCwd();
-  const model = resolveClaudeModelId(opts.modelEnv ?? "AARIA_MODEL");
+  const configuredModel = resolveModelId(opts.modelEnv ?? "AARIA_MODEL");
+  const model = resolveClaudeModelId(
+    opts.modelEnv ?? "AARIA_MODEL",
+    configuredModel === "default" || configuredModel.startsWith("composer")
+      ? "claude-sonnet-4-5"
+      : configuredModel,
+  );
   const label = opts.label ?? "claude";
   console.error(`[aria-agent] runtime=claude (${label}) model=${model}`);
 

@@ -1,0 +1,7 @@
+# Loaded only when AARIA_RUNTIME=mxpf
+# Secrets stay in .env (MXPF_HARNESS_API_KEY / OPENROUTER_API_KEY).
+
+provider: openai
+model: openai/gpt-oss-20b:free
+baseUrl: https://openrouter.ai/api/v1
+permissionMode: bypass

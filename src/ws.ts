@@ -406,7 +406,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
               args,
               timeoutMs,
             );
-            jsonResponse(res, 200, { ok: true, ...result });
+            jsonResponse(res, 200, result);
           } else {
             const result = await bridge.dispatchCmd(agentId, action, args);
             jsonResponse(res, 200, { ok: true, ...result });
