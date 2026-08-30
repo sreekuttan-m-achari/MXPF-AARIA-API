@@ -26,6 +26,7 @@ import { buildContextStatus } from "./context-status.js";
 import { personaStatus, userCallName } from "./persona.js";
 import { skillsStatus } from "./skills/index.js";
 import { fleetStatus, getFleetBridge, listAgentsForApi } from "./fleet/index.js";
+import { getConsoleBridge } from "./console/index.js";
 import { cancelActiveRun } from "./runs.js";
 import {
   deliverMorningBriefIfDue,
@@ -465,6 +466,141 @@ export async function startServer(agent: AriaAgent): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && req.url === "/console") {
+        const bridge = getConsoleBridge();
+        if (!bridge) {
+          jsonResponse(res, 200, {
+            ok: true,
+            enabled: false,
+            connected: false,
+            pending: [],
+            devices: [],
+          });
+          return;
+        }
+        const devices = await bridge.listDevices();
+        jsonResponse(res, 200, {
+          ok: true,
+          enabled: true,
+          ...bridge.status(),
+          pending: bridge.listPending(),
+          devices: devices.map((d) => ({
+            deviceId: d.deviceId,
+            label: d.label,
+            pairedAt: d.pairedAt,
+            expiresAt: d.expiresAt,
+          })),
+        });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/console/pair") {
+        const bridge = getConsoleBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "console disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const code = (body as { code?: string }).code?.trim() ?? "";
+        if (!code) {
+          jsonResponse(res, 400, { error: "code is required" });
+          return;
+        }
+        try {
+          const device = await bridge.approvePair(code);
+          jsonResponse(res, 200, {
+            ok: true,
+            device: {
+              deviceId: device.deviceId,
+              label: device.label,
+              pairedAt: device.pairedAt,
+              expiresAt: device.expiresAt,
+            },
+          });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 400, { ok: false, error });
+        }
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/console/deny") {
+        const bridge = getConsoleBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "console disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const code = (body as { code?: string }).code?.trim() ?? "";
+        if (!code) {
+          jsonResponse(res, 400, { error: "code is required" });
+          return;
+        }
+        const pending = await bridge.denyPair(code);
+        jsonResponse(res, 200, { ok: true, denied: pending });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/console/revoke") {
+        const bridge = getConsoleBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "console disabled" });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          jsonResponse(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const deviceId = (body as { deviceId?: string }).deviceId?.trim() ?? "";
+        if (!deviceId) {
+          jsonResponse(res, 400, { error: "deviceId is required (or 'all')" });
+          return;
+        }
+        if (deviceId.toLowerCase() === "all") {
+          const n = await bridge.revokeAll();
+          jsonResponse(res, 200, { ok: true, revoked: n });
+          return;
+        }
+        const ok = await bridge.revoke(deviceId);
+        jsonResponse(res, ok ? 200 : 404, {
+          ok,
+          revoked: ok ? 1 : 0,
+          error: ok ? undefined : "device not found",
+        });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/console/announce") {
+        const bridge = getConsoleBridge();
+        if (!bridge) {
+          jsonResponse(res, 503, { ok: false, error: "console disabled" });
+          return;
+        }
+        try {
+          await bridge.republish();
+          jsonResponse(res, 200, { ok: true, ...bridge.status() });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { ok: false, error });
+        }
+        return;
+      }
+
       if (req.method === "GET" && req.url === "/voice") {
         jsonResponse(res, 200, { ok: true, ...getVoiceStatus() });
         return;
@@ -805,6 +941,7 @@ export async function startServer(agent: AriaAgent): Promise<void> {
   console.error(`[aria-server] GET /health  GET /cursor  GET /heartbeat  GET /jobs  POST /jobs/run  POST /jobs/reload`);
   console.error(`[aria-server] GET /memory/pending  POST /memory/approve  POST /memory/reject  POST /memory/curate  GET /skills`);
   console.error(`[aria-server] GET /fleet/health  GET /fleet/agents  POST /fleet/approve  POST /fleet/cmd  POST /fleet/update`);
+  console.error(`[aria-server] GET /console  POST /console/pair  POST /console/deny  POST /console/revoke  POST /console/announce`);
   console.error(`[aria-server] POST /voice/warmup  POST /voice/speak  GET|POST /voice  POST /chat  POST /chat/cancel  POST /chat/stream`);
   console.error(`[aria-server] POST /session/reset`);
 

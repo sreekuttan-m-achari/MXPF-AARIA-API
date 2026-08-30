@@ -11,6 +11,7 @@ import {
   isBuiltinCommand,
   isFilesCommand,
   isMemoryCommand,
+  isConsoleCommand,
   isBareSkillCommand,
   isSkillCommand,
   isSkillsCommand,
@@ -882,6 +883,11 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (isConsoleCommand(text)) {
+        await handleConsoleCommand(text);
+        return;
+      }
+
       if (isSkillsCommand(text)) {
         await handleSkillsCommand();
         return;
@@ -1075,6 +1081,177 @@ async function main(): Promise<void> {
         output.write(`${c.err}${msg}${c.reset}\n\n`);
         prompt();
       }
+  }
+
+  async function handleConsoleCommand(text: string): Promise<void> {
+    const parts = text.trim().split(/\s+/);
+    const sub = (parts[1] ?? "").toLowerCase();
+    const arg = parts.slice(2).join(" ").trim();
+
+    const usage = () => {
+      output.write(
+        `${c.dim}usage: /console · /console pending · /console pair <code> · /console deny <code> · /console devices · /console revoke <deviceId|all>${c.reset}\n\n`,
+      );
+    };
+
+    try {
+      if (!sub || sub === "status") {
+        const res = await fetch(`${apiBase()}/console`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!res.ok) throw new Error(`/console returned ${res.status}`);
+        const body = (await res.json()) as {
+          enabled: boolean;
+          ariaId?: string;
+          name?: string;
+          pending?: Array<{ code: string; label: string; deviceId: string; expiresAt: string }>;
+          devices?: Array<{ deviceId: string; label: string; expiresAt: string }>;
+        };
+        if (!body.enabled) {
+          output.write(
+            `${c.warn}web console disabled${c.reset} ${c.dim}(set AARIA_CONSOLE_ENABLED=1 AARIA_CONSOLE_ID=…)${c.reset}\n\n`,
+          );
+        } else {
+          output.write(
+            `${c.ok}console${c.reset} ${c.bold}${body.name ?? body.ariaId}${c.reset} ${c.dim}id=${body.ariaId}${c.reset}\n` +
+              `${c.dim}pending=${body.pending?.length ?? 0} · paired=${body.devices?.length ?? 0}${c.reset}\n\n`,
+          );
+        }
+        prompt();
+        return;
+      }
+
+      if (sub === "pending" || sub === "list") {
+        const res = await fetch(`${apiBase()}/console`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!res.ok) throw new Error(`/console returned ${res.status}`);
+        const body = (await res.json()) as {
+          pending?: Array<{ code: string; label: string; deviceId: string; expiresAt: string }>;
+        };
+        const pending = body.pending ?? [];
+        if (pending.length === 0) {
+          output.write(`${c.dim}no pending pairing requests${c.reset}\n\n`);
+        } else {
+          for (const p of pending) {
+            output.write(
+              `  ${c.cmd}${p.code}${c.reset}  ${p.label}  ${c.dim}${p.deviceId} · expires ${p.expiresAt}${c.reset}\n`,
+            );
+          }
+          output.write(
+            `\n${c.dim}approve: /console pair <code>${c.reset}\n\n`,
+          );
+        }
+        prompt();
+        return;
+      }
+
+      if (sub === "pair" || sub === "approve") {
+        if (!arg) {
+          usage();
+          prompt();
+          return;
+        }
+        const res = await fetch(`${apiBase()}/console/pair`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code: arg }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        const body = (await res.json()) as {
+          ok?: boolean;
+          error?: string;
+          device?: { deviceId: string; label: string; expiresAt: string };
+        };
+        if (!res.ok || !body.ok) {
+          throw new Error(body.error ?? `pair failed (${res.status})`);
+        }
+        output.write(
+          `${c.ok}paired${c.reset} ${body.device?.label} ${c.dim}${body.device?.deviceId}${c.reset}\n` +
+            `${c.dim}expires ${body.device?.expiresAt}${c.reset}\n\n`,
+        );
+        prompt();
+        return;
+      }
+
+      if (sub === "deny") {
+        if (!arg) {
+          usage();
+          prompt();
+          return;
+        }
+        const res = await fetch(`${apiBase()}/console/deny`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code: arg }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        const body = (await res.json()) as { ok?: boolean; error?: string };
+        if (!res.ok || !body.ok) {
+          throw new Error(body.error ?? `deny failed (${res.status})`);
+        }
+        output.write(`${c.dim}denied pairing ${arg}${c.reset}\n\n`);
+        prompt();
+        return;
+      }
+
+      if (sub === "devices") {
+        const res = await fetch(`${apiBase()}/console`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!res.ok) throw new Error(`/console returned ${res.status}`);
+        const body = (await res.json()) as {
+          devices?: Array<{ deviceId: string; label: string; expiresAt: string }>;
+        };
+        const devices = body.devices ?? [];
+        if (devices.length === 0) {
+          output.write(`${c.dim}no paired devices${c.reset}\n\n`);
+        } else {
+          for (const d of devices) {
+            output.write(
+              `  ${d.label || d.deviceId}  ${c.dim}${d.deviceId} · until ${d.expiresAt}${c.reset}\n`,
+            );
+          }
+          output.write(`\n`);
+        }
+        prompt();
+        return;
+      }
+
+      if (sub === "revoke") {
+        if (!arg) {
+          usage();
+          prompt();
+          return;
+        }
+        const res = await fetch(`${apiBase()}/console/revoke`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ deviceId: arg }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        const body = (await res.json()) as {
+          ok?: boolean;
+          revoked?: number;
+          error?: string;
+        };
+        if (!res.ok || !body.ok) {
+          throw new Error(body.error ?? `revoke failed (${res.status})`);
+        }
+        output.write(
+          `${c.ok}revoked${c.reset} ${body.revoked ?? 0} device(s)\n\n`,
+        );
+        prompt();
+        return;
+      }
+
+      usage();
+      prompt();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      output.write(`${c.err}console: ${msg}${c.reset}\n\n`);
+      prompt();
+    }
   }
 
   async function handleMemoryCommand(text: string): Promise<void> {

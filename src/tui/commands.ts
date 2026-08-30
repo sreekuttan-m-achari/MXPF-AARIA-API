@@ -30,6 +30,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     aliases: ["/sk"],
     summary: "Load a skill for the next turn (/skill <name> [prompt])",
   },
+  {
+    name: "/console",
+    aliases: ["/cn"],
+    summary: "Web console pairing (pending · pair · deny · devices · revoke)",
+  },
   { name: "/cancel", aliases: ["/c"], summary: "Cancel the current reply" },
   {
     name: "/voice",
@@ -417,6 +422,12 @@ export function parseFilesCommand(text: string): FilesCommandParse | null {
 
 const EXACT_COMMANDS = new Set(allCommandNames());
 
+/** True for `/console` and `/console …` subcommands. */
+export function isConsoleCommand(text: string): boolean {
+  const head = text.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  return head === "/console" || head === "/cn";
+}
+
 /** True for built-in slash commands (exact or /memory …). */
 export function isBuiltinCommand(text: string): boolean {
   const trimmed = text.trim();
@@ -428,6 +439,9 @@ export function isBuiltinCommand(text: string): boolean {
     return true;
   }
   if (isMemoryCommand(trimmed)) {
+    return true;
+  }
+  if (isConsoleCommand(trimmed)) {
     return true;
   }
   if (isSkillsCommand(trimmed)) {
