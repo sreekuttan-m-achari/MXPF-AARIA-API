@@ -12,6 +12,8 @@ FLEET.md
 .cursor/mcp.json
 .superpowers/
 data/
+# Local console pairing store (device tokens) — never commit
+.aaria/
 # Host-specific / private ops skills (do not publish)
 skills/ironss-maximprof-astra-sudo/
 
