@@ -1,0 +1,5 @@
+# Loaded only when AARIA_RUNTIME=claude
+# Secrets stay in .env (ANTHROPIC_API_KEY).
+
+model: claude-sonnet-4-5
+learnModel: claude-sonnet-4-5

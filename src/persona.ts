@@ -13,6 +13,7 @@ import {
 } from "./learn/memory-store.js";
 import { formatSkillsIndex } from "./skills/index.js";
 import { voiceCapabilitySummary } from "./tts.js";
+import { loadAariaConfig } from "./config/load.js";
 
 const DEFAULT_CANDIDATES = ["SOUL.md", "PROFILE.md"] as const;
 
@@ -165,7 +166,7 @@ export function userTimezone(cwd: string = agentCwd()): string {
     }
   }
 
-  return DEFAULT_TIMEZONE;
+  return loadAariaConfig().hub.timezone ?? DEFAULT_TIMEZONE;
 }
 
 export function buildMorningBriefPrompt(
@@ -217,7 +218,7 @@ export function buildGreetingPrompt(userContext?: string): string {
 }
 
 export function agentCwd(): string {
-  return process.env.AARIA_AGENT_CWD?.trim() || process.cwd();
+  return process.env.AARIA_AGENT_CWD?.trim() || loadAariaConfig().hub.agentCwd || process.cwd();
 }
 
 /** Preferred name to address the user by, parsed from `**Call me:** X` in USER.md. */

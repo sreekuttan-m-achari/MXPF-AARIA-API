@@ -124,20 +124,43 @@ function heatSegment(label: string, pct: number): string {
   return `${c.italic}${heatColor(pct)}${label} ${Math.round(pct)}%${c.reset}`;
 }
 
+/** Compact token counts for footers (1600 → 1.6k). */
+export function formatTokenCount(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n >= 1000) {
+    const k = n / 1000;
+    return `${k >= 10 ? Math.round(k) : Math.round(k * 10) / 10}k`;
+  }
+  return String(Math.round(n));
+}
+
 /**
  * Italic post-reply / health footer: ctx · mem · user with per-metric heat.
+ * When token counts are known, ctx includes `(used/limit)`.
  * Leading newline is the caller's responsibility.
  */
 export function formatHeatStatusLine(parts: {
   ctxPct: number | null;
   memPct: number;
   userPct: number;
+  usedTokens?: number | null;
+  limitTokens?: number | null;
 }): string {
   const sep = `${c.italic}${c.dim} · ${c.reset}`;
+  let tok = "";
+  if (
+    parts.usedTokens != null &&
+    parts.limitTokens != null &&
+    parts.limitTokens > 0
+  ) {
+    tok = `${c.italic}${c.dim} (${formatTokenCount(parts.usedTokens)}/${formatTokenCount(parts.limitTokens)})${c.reset}`;
+  } else if (parts.limitTokens != null && parts.limitTokens > 0) {
+    tok = `${c.italic}${c.dim} (—/${formatTokenCount(parts.limitTokens)})${c.reset}`;
+  }
   const ctx =
     parts.ctxPct == null
-      ? `${c.italic}${c.dim}ctx —${c.reset}`
-      : heatSegment("ctx", parts.ctxPct);
+      ? `${c.italic}${c.dim}ctx —${c.reset}${tok}`
+      : `${heatSegment("ctx", parts.ctxPct)}${tok}`;
   const mem = heatSegment("mem", parts.memPct);
   const user = heatSegment("user", parts.userPct);
   return `${ctx}${sep}${mem}${sep}${user}`;

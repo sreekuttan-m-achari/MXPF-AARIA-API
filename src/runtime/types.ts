@@ -1,6 +1,6 @@
-/** Shared agent harness surface for Cursor + Claude runtimes. */
+/** Shared agent harness surface for Cursor + Claude + MXPF runtimes. */
 
-export type AgentRuntimeKind = "cursor" | "claude";
+export type AgentRuntimeKind = "cursor" | "claude" | "mxpf";
 
 export type AriaRunResult = {
   id: string;

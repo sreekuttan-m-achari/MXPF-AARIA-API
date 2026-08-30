@@ -6,6 +6,9 @@ export function resolveRuntimeKind(): AgentRuntimeKind {
   if (raw === "claude" || raw === "anthropic") {
     return "claude";
   }
+  if (raw === "mxpf" || raw === "aaria" || raw === "maximprof") {
+    return "mxpf";
+  }
   return "cursor";
 }
 

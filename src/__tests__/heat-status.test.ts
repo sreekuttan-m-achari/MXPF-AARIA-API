@@ -41,13 +41,29 @@ describe("formatHeatStatusLine", () => {
     assert.ok(line.includes(heatColor(50)));
   });
 
+  it("appends token utilization next to ctx", () => {
+    const line = formatHeatStatusLine({
+      ctxPct: 8,
+      memPct: 71,
+      userPct: 0,
+      usedTokens: 16_000,
+      limitTokens: 200_000,
+    });
+    assert.match(line, /ctx 8%/);
+    assert.match(line, /\(16k\/200k\)/);
+    assert.match(line, /mem 71%/);
+    assert.match(line, /user 0%/);
+  });
+
   it("uses dim ctx — when ctxPct is null", () => {
     const line = formatHeatStatusLine({
       ctxPct: null,
       memPct: 10,
       userPct: 20,
+      limitTokens: 200_000,
     });
     assert.ok(line.includes(`${c.dim}ctx —${c.reset}`));
+    assert.match(line, /\(—\/200k\)/);
     assert.equal(line.includes("ctx 0%"), false);
     assert.ok(line.includes(heatColor(10)));
     assert.ok(line.includes(heatColor(20)));
