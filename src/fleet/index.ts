@@ -1,3 +1,5 @@
+import { getAgent } from "../agent-manager.js";
+import { startConsole, stopConsole } from "../console/index.js";
 import { createFleetBus, type FleetBus } from "./bus.js";
 import { loadFleetMqttConfig, type FleetMqttConfig } from "./config.js";
 import {
@@ -11,6 +13,7 @@ export { listFleetAgentsView } from "./bridge.js";
 export type { FleetHubView } from "./hub.js";
 
 let bridge: FleetBridge | null = null;
+let fleetBus: FleetBus | null = null;
 let enabled = false;
 let connected = false;
 let lastCfg: FleetMqttConfig | null = null;
@@ -45,9 +48,15 @@ async function connectOnce(): Promise<boolean> {
   enabled = true;
   lastCfg = cfg;
   const bus: FleetBus = await createFleetBus(cfg);
+  fleetBus = bus;
   bridge = await startFleetBridge(bus);
   connected = true;
   console.error(`[fleet] connected via ${cfg.provider}`);
+  try {
+    await startConsole(bus, getAgent);
+  } catch (err) {
+    console.error("[console] failed to start:", err);
+  }
   return true;
 }
 
@@ -75,17 +84,20 @@ export async function startFleet(): Promise<void> {
   try {
     if (bridge) {
       try {
+        await stopConsole();
         await bridge.stop();
       } catch {
         /* ignore */
       }
       bridge = null;
+      fleetBus = null;
       connected = false;
     }
     await connectOnce();
   } catch (err) {
     connected = false;
     bridge = null;
+    fleetBus = null;
     console.error("[fleet] failed to connect:", err);
     console.error("[fleet] retrying in 10s…");
     scheduleReconnect(10_000);
@@ -97,11 +109,18 @@ export async function stopFleet(): Promise<void> {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
   }
+  await stopConsole();
   if (bridge) {
     await bridge.stop();
     bridge = null;
   }
+  fleetBus = null;
   connected = false;
+}
+
+/** Exposed for tests / diagnostics. */
+export function getFleetBus(): FleetBus | null {
+  return fleetBus;
 }
 
 export async function listAgentsForApi() {

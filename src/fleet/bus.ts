@@ -4,7 +4,12 @@ import type { FleetMqttConfig } from "./config.js";
 import { emptyBusStats, type FleetBusStats } from "./hub.js";
 
 export type FleetBus = {
-  publish: (topic: string, payload: string, qos?: 0 | 1 | 2) => Promise<void>;
+  publish: (
+    topic: string,
+    payload: string,
+    qos?: 0 | 1 | 2,
+    retain?: boolean,
+  ) => Promise<void>;
   subscribe: (
     topic: string,
     handler: (topic: string, payload: Buffer) => void | Promise<void>,
@@ -59,8 +64,18 @@ export async function createFleetBus(cfg: FleetMqttConfig): Promise<FleetBus> {
   });
 
   return {
-    async publish(topic, payload, qos = 1) {
-      await client.publishAsync(topic, payload, { qos });
+    async publish(topic, payload, qos = 1, retain = false) {
+      const result = await client.publishAsync(topic, payload, { qos, retain });
+      const reason =
+        result && typeof result === "object" && "reasonCode" in result
+          ? Number((result as { reasonCode?: number }).reasonCode)
+          : undefined;
+      // MQTT 5: 0/16 = success; ≥128 = failure (e.g. not authorized)
+      if (reason != null && reason >= 128) {
+        throw new Error(
+          `mqtt publish rejected topic=${topic} reasonCode=${reason}`,
+        );
+      }
       messagesOut += 1;
       lastOutAt = new Date().toISOString();
       lastTopic = topic;
